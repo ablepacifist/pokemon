@@ -1,0 +1,5 @@
+001,Bulbasaur,Grass,Poison,12
+020,Raticate,Normal,NULL,55
+021,Spearow,Normal,Flying,2
+403,shinx,electric,NULL,33
+194,wooper,water,ground,55
