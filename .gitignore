@@ -1,0 +1,7 @@
+pokemonServer/build/
+pokemonServer/.gradle/
+*.class
+*.log
+*.lck
+.idea/
+.vscode/
