@@ -10,6 +10,8 @@ public class Pokestop {
     private Integer lastSpunBy;
     private Instant lastSpunAt;
     private boolean canSpin;
+    private String biome = "NORMAL";
+    private Instant lureExpiresAt;
 
     public Pokestop() {}
 
@@ -27,4 +29,9 @@ public class Pokestop {
     public void setLastSpunAt(Instant lastSpunAt) { this.lastSpunAt = lastSpunAt; }
     public boolean isCanSpin() { return canSpin; }
     public void setCanSpin(boolean canSpin) { this.canSpin = canSpin; }
+    public String getBiome() { return biome != null ? biome : "NORMAL"; }
+    public void setBiome(String biome) { this.biome = biome; }
+    public Instant getLureExpiresAt() { return lureExpiresAt; }
+    public void setLureExpiresAt(Instant lureExpiresAt) { this.lureExpiresAt = lureExpiresAt; }
+    public boolean isLured() { return lureExpiresAt != null && Instant.now().isBefore(lureExpiresAt); }
 }

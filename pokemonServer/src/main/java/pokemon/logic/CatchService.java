@@ -43,7 +43,7 @@ public class CatchService {
      * Returns the caught Pokemon if successful, null if failed, throws if invalid.
      */
     public CaughtPokemon attemptCatch(int playerId, long spawnId, double playerLat,
-                                      double playerLng, String ballType) throws Exception {
+                                      double playerLng, String ballType, String berry) throws Exception {
         PokemonSpawn spawn = db.getSpawnById(spawnId);
         if (spawn == null) throw new IllegalArgumentException("Spawn not found");
         if (spawn.getCaughtByPlayer() != null) throw new IllegalStateException("Already caught");
@@ -58,6 +58,17 @@ public class CatchService {
         PokemonSpecies species = db.getSpeciesById(spawn.getSpeciesId());
         double rate = BASE_CATCH_RATE[Math.min(species.getRarity(), 5)]
                     * BALL_MULTIPLIER.getOrDefault(ballType, 1.0);
+
+        boolean doubleCandy = false;
+        if (berry != null && !berry.isBlank()) {
+            int berryCount = db.getItemCount(playerId, berry);
+            if (berryCount > 0) {
+                db.adjustItem(playerId, berry, -1);
+                if ("RAZZ_BERRY".equals(berry))       rate = Math.min(rate * 1.5, 1.0);
+                else if ("PINAP_BERRY".equals(berry)) doubleCandy = true;
+                // NANAB_BERRY: consumed, no catch-rate bonus (would prevent dodge in full implementation)
+            }
+        }
 
         if (RNG.nextDouble() > rate) {
             try { db.addXp(playerId, 10); } catch (Exception ignored) {}
@@ -106,8 +117,10 @@ public class CatchService {
         // Assign the moves this Pokemon knows at its catch level
         try { moveService.assignInitialMoves(id, species.getId(), level); } catch (Exception ignored) {}
 
-        // XP for catching; coins come from battles/gyms only
+        // XP + stardust + species candy for catching
         try { db.addXp(playerId, species.getRarity() * 100); } catch (Exception ignored) {}
+        try { db.addStardust(playerId, 20 + RNG.nextInt(31)); } catch (Exception ignored) {} // 20-50 stardust
+        try { db.adjustItem(playerId, "CANDY_" + species.getId(), doubleCandy ? 6 : 3); } catch (Exception ignored) {}
 
         return caught;
     }

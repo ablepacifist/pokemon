@@ -62,13 +62,24 @@ public class PokestopController {
                 return ResponseEntity.status(409).body("Pokestop is on cooldown");
             }
 
-            // Give random items; coins come from battles/gyms only
-            String[] pool = {"POKEBALL","POKEBALL","POKEBALL","GREAT_BALL","GREAT_BALL","ULTRA_BALL","POTION","REVIVE"};
-            String item = pool[RNG.nextInt(pool.length)];
-            int qty = 1 + RNG.nextInt(3);
+            // Drop table: Lure Module (~3%), berry (~7%), stone (~5%), regular items otherwise
+            String item; int qty;
+            if (RNG.nextInt(30) == 0) {
+                item = "LURE_MODULE"; qty = 1;
+            } else if (RNG.nextInt(15) == 0) {
+                String[] berries = {"RAZZ_BERRY","NANAB_BERRY","PINAP_BERRY"};
+                item = berries[RNG.nextInt(berries.length)]; qty = 1 + RNG.nextInt(2);
+            } else if (RNG.nextInt(20) == 0) {
+                String[] stones = {"THUNDER_STONE","WATER_STONE","FIRE_STONE","LEAF_STONE","MOON_STONE","LINK_CABLE"};
+                item = stones[RNG.nextInt(stones.length)]; qty = 1;
+            } else {
+                String[] pool = {"POKEBALL","POKEBALL","POKEBALL","GREAT_BALL","GREAT_BALL","ULTRA_BALL","POTION","REVIVE"};
+                item = pool[RNG.nextInt(pool.length)]; qty = 1 + RNG.nextInt(3);
+            }
             db.adjustItem(playerId, item, qty);
             db.spinPokestop(stopId, playerId);
             try { db.addXp(playerId, 50); } catch (Exception ignored) {}
+            try { db.addStardust(playerId, 50 + RNG.nextInt(51)); } catch (Exception ignored) {} // 50-100 stardust
 
             return ResponseEntity.ok(Map.of(
                 "item", item,
@@ -86,8 +97,28 @@ public class PokestopController {
             String name = body.getOrDefault("name", "Pokestop").toString();
             double lat = ((Number) body.get("lat")).doubleValue();
             double lng = ((Number) body.get("lng")).doubleValue();
-            db.addPokestop(name, lat, lng);
-            return ResponseEntity.ok("Pokestop added: " + name);
+            String biome = GeospatialUtils.detectBiome(lat, lng);
+            db.addPokestop(name, lat, lng, biome);
+            return ResponseEntity.ok("Pokestop added: " + name + " (biome: " + biome + ")");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("Error: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/pokestop/lure")
+    public ResponseEntity<?> lure(@RequestBody Map<String, Object> body) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth.getPrincipal().equals("anonymousUser")) {
+            return ResponseEntity.status(401).body("Login required");
+        }
+        try {
+            int playerId = ((CustomUserDetails) auth.getPrincipal()).getId();
+            long stopId = ((Number) body.get("stopId")).longValue();
+            int count = db.getItemCount(playerId, "LURE_MODULE");
+            if (count <= 0) return ResponseEntity.status(409).body("No Lure Module in inventory");
+            db.adjustItem(playerId, "LURE_MODULE", -1);
+            db.lurePokestop(stopId);
+            return ResponseEntity.ok(Map.of("message", "Lure Module activated! Pokémon will swarm for 30 minutes."));
         } catch (Exception e) {
             return ResponseEntity.status(500).body("Error: " + e.getMessage());
         }

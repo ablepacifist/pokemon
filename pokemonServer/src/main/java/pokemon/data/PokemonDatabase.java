@@ -36,6 +36,7 @@ public class PokemonDatabase {
         seedSpecies();
         seedMoves();
         seedLearnsets();
+        seedEvolutions();
         seedStarterItems();
     }
 
@@ -91,7 +92,8 @@ public class PokemonDatabase {
                     CAUGHT_LNG DOUBLE,
                     NICKNAME VARCHAR(30),
                     POKEMON_EXP BIGINT DEFAULT 0,
-                    POKEMON_IV DOUBLE DEFAULT 0.95
+                    POKEMON_IV DOUBLE DEFAULT 0.95,
+                    FAVOURITE BOOLEAN DEFAULT FALSE
                 )""");
 
             s.execute("""
@@ -101,7 +103,9 @@ public class PokemonDatabase {
                     LAT DOUBLE,
                     LNG DOUBLE,
                     LAST_SPUN_BY INT,
-                    LAST_SPUN_AT TIMESTAMP
+                    LAST_SPUN_AT TIMESTAMP,
+                    BIOME VARCHAR(20) DEFAULT 'NORMAL',
+                    LURE_EXPIRES_AT TIMESTAMP
                 )""");
 
             s.execute("""
@@ -124,7 +128,17 @@ public class PokemonDatabase {
                 CREATE TABLE IF NOT EXISTS POKEMON_PLAYER_STATS (
                     PLAYER_ID INT PRIMARY KEY,
                     XP INT DEFAULT 0,
-                    POKE_COINS INT DEFAULT 0
+                    POKE_COINS INT DEFAULT 0,
+                    STARDUST INT DEFAULT 0
+                )""");
+
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS POKEMON_EVOLUTIONS (
+                    SPECIES_ID INT,
+                    EVOLVES_TO_ID INT,
+                    MIN_LEVEL INT DEFAULT 0,
+                    ITEM_REQUIRED VARCHAR(30),
+                    PRIMARY KEY (SPECIES_ID, EVOLVES_TO_ID)
                 )""");
 
             s.execute("""
@@ -175,6 +189,10 @@ public class PokemonDatabase {
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN SPEED INT DEFAULT 0");
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN POKEMON_EXP BIGINT DEFAULT 0");
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN POKEMON_IV DOUBLE DEFAULT 0.95");
+            runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN FAVOURITE BOOLEAN DEFAULT FALSE");
+            runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN STARDUST INT DEFAULT 0");
+            runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN BIOME VARCHAR(20) DEFAULT 'NORMAL'");
+            runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN LURE_EXPIRES_AT TIMESTAMP");
             conn.commit();
         } catch (Exception e) {
             System.err.println("Schema migration warning: " + e.getMessage());
@@ -585,13 +603,25 @@ public class PokemonDatabase {
         }
     }
 
-    public void addPokestop(String name, double lat, double lng) throws SQLException {
+    public void addPokestop(String name, double lat, double lng, String biome) throws SQLException {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO POKESTOPS (NAME,LAT,LNG) VALUES (?,?,?)")) {
+                "INSERT INTO POKESTOPS (NAME,LAT,LNG,BIOME) VALUES (?,?,?,?)")) {
             ps.setString(1, name);
             ps.setDouble(2, lat);
             ps.setDouble(3, lng);
+            ps.setString(4, biome != null ? biome : "NORMAL");
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void lurePokestop(long stopId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE POKESTOPS SET LURE_EXPIRES_AT=? WHERE ID=?")) {
+            ps.setTimestamp(1, Timestamp.from(Instant.now().plusSeconds(1800)));
+            ps.setLong(2, stopId);
             ps.executeUpdate();
             conn.commit();
         }
@@ -726,16 +756,20 @@ public class PokemonDatabase {
     public int[] getPlayerStats(int playerId) throws SQLException {
         try (Connection conn = getConnection()) {
             PreparedStatement ps = conn.prepareStatement(
-                "SELECT XP, POKE_COINS FROM POKEMON_PLAYER_STATS WHERE PLAYER_ID=?");
+                "SELECT XP, POKE_COINS, STARDUST FROM POKEMON_PLAYER_STATS WHERE PLAYER_ID=?");
             ps.setInt(1, playerId);
             ResultSet rs = ps.executeQuery();
-            if (rs.next()) return new int[]{rs.getInt("XP"), rs.getInt("POKE_COINS")};
+            if (rs.next()) {
+                int stardust = 0;
+                try { stardust = rs.getInt("STARDUST"); } catch (SQLException ignored) {}
+                return new int[]{rs.getInt("XP"), rs.getInt("POKE_COINS"), stardust};
+            }
             PreparedStatement ins = conn.prepareStatement(
-                "INSERT INTO POKEMON_PLAYER_STATS (PLAYER_ID, XP, POKE_COINS) VALUES (?,0,100)");
+                "INSERT INTO POKEMON_PLAYER_STATS (PLAYER_ID, XP, POKE_COINS, STARDUST) VALUES (?,0,100,0)");
             ins.setInt(1, playerId);
             ins.executeUpdate();
             conn.commit();
-            return new int[]{0, 100};
+            return new int[]{0, 100, 0};
         }
     }
 
@@ -867,6 +901,36 @@ public class PokemonDatabase {
         } catch (Exception e) { System.err.println("Learnset seeding failed: " + e.getMessage()); }
     }
 
+    private void seedEvolutions() {
+        try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
+            ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM POKEMON_EVOLUTIONS");
+            rs.next();
+            if (rs.getInt(1) > 0) return;
+        } catch (SQLException e) { System.err.println("Evolution seed check failed: " + e.getMessage()); return; }
+
+        try (var in = getClass().getClassLoader().getResourceAsStream("evolutions.csv");
+             var reader = new java.io.BufferedReader(new java.io.InputStreamReader(in));
+             Connection conn = getConnection()) {
+            PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO POKEMON_EVOLUTIONS (SPECIES_ID,EVOLVES_TO_ID,MIN_LEVEL,ITEM_REQUIRED) VALUES (?,?,?,?)");
+            String line; boolean header = true;
+            while ((line = reader.readLine()) != null) {
+                if (header) { header = false; continue; }
+                String[] p = line.split(",", -1);
+                if (p.length < 4) continue;
+                ps.setInt(1, Integer.parseInt(p[0].trim()));
+                ps.setInt(2, Integer.parseInt(p[1].trim()));
+                ps.setInt(3, p[2].trim().isEmpty() ? 0 : Integer.parseInt(p[2].trim()));
+                String item = p[3].trim();
+                ps.setString(4, item.isEmpty() ? null : item);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+            conn.commit();
+            System.out.println("Pokemon evolutions seeded.");
+        } catch (Exception e) { System.err.println("Evolution seeding failed: " + e.getMessage()); }
+    }
+
     // ── Move CRUD ─────────────────────────────────────────────────────────────
 
     public List<pokemon.object.PokemonMove> getCaughtPokemonMoves(long caughtId, int playerId) throws SQLException {
@@ -986,6 +1050,92 @@ public class PokemonDatabase {
         return m;
     }
 
+    // ── Evolution CRUD ────────────────────────────────────────────────────────
+
+    public List<Map<String, Object>> getEvolutionsFor(int speciesId) throws SQLException {
+        List<Map<String, Object>> list = new ArrayList<>();
+        String sql = """
+            SELECT e.EVOLVES_TO_ID, e.MIN_LEVEL, e.ITEM_REQUIRED, sp.NAME
+            FROM POKEMON_EVOLUTIONS e JOIN POKEMON_SPECIES sp ON e.EVOLVES_TO_ID = sp.ID
+            WHERE e.SPECIES_ID = ?""";
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, speciesId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                Map<String, Object> m = new HashMap<>();
+                m.put("evolvesToId",   rs.getInt("EVOLVES_TO_ID"));
+                m.put("evolvesToName", rs.getString("NAME"));
+                m.put("minLevel",      rs.getInt("MIN_LEVEL"));
+                m.put("itemRequired",  rs.getString("ITEM_REQUIRED"));
+                list.add(m);
+            }
+        }
+        return list;
+    }
+
+    /** Changes the species of a caught Pokemon and recalculates stats using stored IV. */
+    public void evolvePokemon(long caughtId, int playerId, int newSpeciesId) throws SQLException {
+        CaughtPokemon p = getCaughtById(caughtId, playerId);
+        if (p == null) throw new IllegalArgumentException("Pokemon not found");
+        PokemonSpecies sp = getSpeciesById(newSpeciesId);
+        if (sp == null) throw new IllegalArgumentException("Target species not found");
+
+        double iv = p.getIv() > 0 ? p.getIv() : 0.95;
+        int lvl   = p.getPokemonLevel();
+        int hp    = statAtLvl(sp.getBaseHp(),      lvl, iv) + lvl;
+        int atk   = statAtLvl(sp.getBaseAttack(),  lvl, iv);
+        int def   = statAtLvl(sp.getBaseDefense(), lvl, iv);
+        int spAtk = statAtLvl(sp.getBaseSpAtk(),   lvl, iv);
+        int spDef = statAtLvl(sp.getBaseSpDef(),   lvl, iv);
+        int speed = statAtLvl(sp.getBaseSpeed(),   lvl, iv);
+        String sprite = String.format("pokemon_icon_%03d_00.png", newSpeciesId);
+
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                UPDATE CAUGHT_POKEMON
+                SET SPECIES_ID=?,HP=?,ATTACK=?,DEFENSE=?,SP_ATK=?,SP_DEF=?,SPEED=?
+                WHERE ID=? AND PLAYER_ID=?""")) {
+            ps.setInt(1, newSpeciesId); ps.setInt(2, hp);    ps.setInt(3, atk);
+            ps.setInt(4, def);         ps.setInt(5, spAtk);  ps.setInt(6, spDef);
+            ps.setInt(7, speed);       ps.setLong(8, caughtId); ps.setInt(9, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    // ── Favourite ─────────────────────────────────────────────────────────────
+
+    public void setFavourite(long caughtId, int playerId, boolean fav) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE CAUGHT_POKEMON SET FAVOURITE=? WHERE ID=? AND PLAYER_ID=?")) {
+            ps.setBoolean(1, fav);
+            ps.setLong(2, caughtId);
+            ps.setInt(3, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    // ── Stardust ──────────────────────────────────────────────────────────────
+
+    public void addStardust(int playerId, int amount) throws SQLException {
+        getPlayerStats(playerId); // ensure row exists
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE POKEMON_PLAYER_STATS SET STARDUST = STARDUST + ? WHERE PLAYER_ID=?")) {
+            ps.setInt(1, Math.max(0, amount));
+            ps.setInt(2, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public int getStardust(int playerId) throws SQLException {
+        int[] stats = getPlayerStats(playerId);
+        return stats.length > 2 ? stats[2] : 0;
+    }
+
     // ── Mappers ───────────────────────────────────────────────────────────────
 
     private PokemonSpawn mapSpawn(ResultSet rs) throws SQLException {
@@ -1021,6 +1171,7 @@ public class PokemonDatabase {
         c.setNickname(rs.getString("NICKNAME"));
         try { c.setExp(rs.getLong("POKEMON_EXP")); } catch (SQLException ignored) {}
         try { c.setIv(rs.getDouble("POKEMON_IV")); } catch (SQLException ignored) {}
+        try { c.setFavourite(rs.getBoolean("FAVOURITE")); } catch (SQLException ignored) {}
         try { c.setSpeciesName(rs.getString("NAME")); } catch (SQLException ignored) {}
         try { c.setSpriteKey(rs.getString("SPRITE_KEY")); } catch (SQLException ignored) {}
         try { c.setType1(rs.getString("TYPE1")); } catch (SQLException ignored) {}
@@ -1040,6 +1191,11 @@ public class PokemonDatabase {
         if (spunAt != null) stop.setLastSpunAt(spunAt.toInstant());
         stop.setCanSpin(spunAt == null ||
             Instant.now().isAfter(spunAt.toInstant().plusSeconds(300)));
+        try { stop.setBiome(rs.getString("BIOME")); } catch (SQLException ignored) {}
+        try {
+            Timestamp lureAt = rs.getTimestamp("LURE_EXPIRES_AT");
+            if (lureAt != null) stop.setLureExpiresAt(lureAt.toInstant());
+        } catch (SQLException ignored) {}
         return stop;
     }
 

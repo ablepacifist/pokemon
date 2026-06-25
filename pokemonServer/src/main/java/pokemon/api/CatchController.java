@@ -30,8 +30,10 @@ public class CatchController {
             double lat = ((Number) body.get("lat")).doubleValue();
             double lng = ((Number) body.get("lng")).doubleValue();
             String ballType = body.getOrDefault("ballType", "POKEBALL").toString().toUpperCase();
+            String berry = body.containsKey("berry") && body.get("berry") != null
+                ? body.get("berry").toString().toUpperCase() : null;
 
-            CaughtPokemon result = catchService.attemptCatch(playerId, spawnId, lat, lng, ballType);
+            CaughtPokemon result = catchService.attemptCatch(playerId, spawnId, lat, lng, ballType, berry);
             if (result == null) {
                 return ResponseEntity.ok(Map.of("success", false, "message", "It broke free!"));
             }
