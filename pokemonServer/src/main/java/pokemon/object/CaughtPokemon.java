@@ -23,6 +23,7 @@ public class CaughtPokemon {
     private String nickname;
     private long   exp;
     private double iv;
+    private boolean favourite;
     // transient base stats — populated only by getCaughtById, not stored in CAUGHT_POKEMON
     private transient int baseHpForGrind, baseAtkForGrind, baseDefForGrind;
     private transient int baseSpAtkForGrind, baseSpDefForGrind, baseSpeedForGrind;
@@ -69,6 +70,8 @@ public class CaughtPokemon {
     public void setExp(long exp) { this.exp = exp; }
     public double getIv() { return iv; }
     public void setIv(double iv) { this.iv = iv; }
+    public boolean isFavourite() { return favourite; }
+    public void setFavourite(boolean favourite) { this.favourite = favourite; }
     public int getBaseHpForGrind() { return baseHpForGrind; }
     public void setBaseHpForGrind(int v) { this.baseHpForGrind = v; }
     public int getBaseAtkForGrind() { return baseAtkForGrind; }

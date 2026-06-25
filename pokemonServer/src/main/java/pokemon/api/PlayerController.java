@@ -26,18 +26,19 @@ public class PlayerController {
             int playerId = ((CustomUserDetails) auth.getPrincipal()).getId();
             String username = auth.getName();
             int[] s = db.getPlayerStats(playerId);
-            int xp = s[0], coins = s[1];
+            int xp = s[0], coins = s[1], stardust = s.length > 2 ? s[2] : 0;
             int totalCaught = db.countCaughtByPlayer(playerId);
             int level = computeLevel(xp);
             int prevXp = xpForLevel(level);
             int nextXp = xpForLevel(level + 1);
             return ResponseEntity.ok(Map.of(
-                "username", username,
-                "level", level,
-                "xp", xp,
-                "xpProgress", xp - prevXp,
-                "xpRequired", nextXp - prevXp,
-                "coins", coins,
+                "username",    username,
+                "level",       level,
+                "xp",          xp,
+                "xpProgress",  xp - prevXp,
+                "xpRequired",  nextXp - prevXp,
+                "coins",       coins,
+                "stardust",    stardust,
                 "totalCaught", totalCaught
             ));
         } catch (Exception e) {
