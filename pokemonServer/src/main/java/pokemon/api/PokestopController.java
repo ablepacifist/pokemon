@@ -62,19 +62,20 @@ public class PokestopController {
                 return ResponseEntity.status(409).body("Pokestop is on cooldown");
             }
 
-            // Drop table: Lure Module (~3%), berry (~7%), stone (~5%), regular items otherwise
+            // Drop table: Lure Module (~3%), berry (~20%), stone (~5%), regular items otherwise
+            // Quantities doubled across the board vs original
             String item; int qty;
             if (RNG.nextInt(30) == 0) {
                 item = "LURE_MODULE"; qty = 1;
-            } else if (RNG.nextInt(15) == 0) {
+            } else if (RNG.nextInt(5) == 0) {
                 String[] berries = {"RAZZ_BERRY","NANAB_BERRY","PINAP_BERRY"};
-                item = berries[RNG.nextInt(berries.length)]; qty = 1 + RNG.nextInt(2);
+                item = berries[RNG.nextInt(berries.length)]; qty = 2 + RNG.nextInt(3);
             } else if (RNG.nextInt(20) == 0) {
                 String[] stones = {"THUNDER_STONE","WATER_STONE","FIRE_STONE","LEAF_STONE","MOON_STONE","LINK_CABLE"};
-                item = stones[RNG.nextInt(stones.length)]; qty = 1;
+                item = stones[RNG.nextInt(stones.length)]; qty = 2;
             } else {
                 String[] pool = {"POKEBALL","POKEBALL","POKEBALL","GREAT_BALL","GREAT_BALL","ULTRA_BALL","POTION","REVIVE"};
-                item = pool[RNG.nextInt(pool.length)]; qty = 1 + RNG.nextInt(3);
+                item = pool[RNG.nextInt(pool.length)]; qty = 2 + RNG.nextInt(5);
             }
             db.adjustItem(playerId, item, qty);
             db.spinPokestop(stopId, playerId);
