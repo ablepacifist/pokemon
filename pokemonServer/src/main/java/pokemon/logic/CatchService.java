@@ -51,6 +51,9 @@ public class CatchService {
         double dist = GeospatialUtils.distanceMeters(playerLat, playerLng, spawn.getLat(), spawn.getLng());
         if (dist > MAX_CATCH_DISTANCE_M) throw new IllegalStateException("Too far away (" + (int)dist + "m)");
 
+        int boxCount = db.countCaughtByPlayer(playerId);
+        if (boxCount >= 300) throw new IllegalStateException("Pokemon Box is full (300/300). Transfer some Pokemon first.");
+
         int ballCount = db.getItemCount(playerId, ballType);
         if (ballCount <= 0) throw new IllegalStateException("No " + ballType + " remaining");
         db.adjustItem(playerId, ballType, -1);

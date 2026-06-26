@@ -205,13 +205,32 @@ public class PokemonDatabase {
 
     // ── Seeding ──────────────────────────────────────────────────────────────
 
+    private int countCsvRows(String resource) {
+        try (var in = getClass().getClassLoader().getResourceAsStream(resource);
+             var reader = new BufferedReader(new InputStreamReader(in))) {
+            int count = 0;
+            String line;
+            boolean header = true;
+            while ((line = reader.readLine()) != null) {
+                if (header) { header = false; continue; }
+                if (!line.isBlank()) count++;
+            }
+            return count;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     private void seedSpecies() {
-        // Re-seed if BASE_SP_ATK is still all zeros (old data) or table is empty
+        // Re-seed whenever the CSV has more rows than the DB (e.g. after Gen 1→7 expansion)
+        int csvCount = countCsvRows("species.csv");
         try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
-            ResultSet rs = st.executeQuery(
-                "SELECT COUNT(*) FROM POKEMON_SPECIES WHERE BASE_SP_ATK > 0");
+            ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM POKEMON_SPECIES");
             rs.next();
-            if (rs.getInt(1) > 0) return; // already seeded with real stats
+            int dbCount = rs.getInt(1);
+            if (dbCount == csvCount && dbCount > 0) return; // already in sync
+            System.out.println("[PokemonDB] Species count mismatch (DB=" + dbCount
+                + " CSV=" + csvCount + ") — re-seeding species...");
             st.execute("DELETE FROM POKEMON_SPECIES");
             conn.commit();
         } catch (SQLException e) {
@@ -265,7 +284,7 @@ public class PokemonDatabase {
             }
             ps.executeBatch();
             conn.commit();
-            System.out.println("Pokemon species seeded with real base stats.");
+            System.out.println("[PokemonDB] Seeded " + csvCount + " Pokemon species (Gen 1–7).");
         } catch (Exception e) {
             System.err.println("Species seeding failed: " + e.getMessage());
         }
@@ -874,10 +893,16 @@ public class PokemonDatabase {
     }
 
     private void seedLearnsets() {
+        int csvCount = countCsvRows("learnsets.csv");
         try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM POKEMON_LEARNSET");
             rs.next();
-            if (rs.getInt(1) > 0) return;
+            int dbCount = rs.getInt(1);
+            if (dbCount == csvCount && dbCount > 0) return;
+            System.out.println("[PokemonDB] Learnset count mismatch (DB=" + dbCount
+                + " CSV=" + csvCount + ") — re-seeding learnsets...");
+            st.execute("DELETE FROM POKEMON_LEARNSET");
+            conn.commit();
         } catch (SQLException e) { System.err.println("Learnset seed check failed: " + e.getMessage()); return; }
 
         try (var in = getClass().getClassLoader().getResourceAsStream("learnsets.csv");
@@ -897,7 +922,7 @@ public class PokemonDatabase {
             }
             ps.executeBatch();
             conn.commit();
-            System.out.println("Pokemon learnsets seeded.");
+            System.out.println("[PokemonDB] Seeded " + csvCount + " learnset entries (Gen 1, pokemondb.net accurate).");
         } catch (Exception e) { System.err.println("Learnset seeding failed: " + e.getMessage()); }
     }
 

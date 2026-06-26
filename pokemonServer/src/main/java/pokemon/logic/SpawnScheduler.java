@@ -50,11 +50,13 @@ public class SpawnScheduler {
             }
 
             // Spawn near players who were active in the last 30 minutes
+            // Biome is detected from the player's actual location — independent of any pokestop
             List<double[]> playerLocs = db.getRecentPlayerLocations();
             for (double[] pos : playerLocs) {
+                String playerBiome = GeospatialUtils.detectBiome(pos[0], pos[1]);
                 int count = 2 + RNG.nextInt(2); // 2-3 per player per cycle
                 for (int i = 0; i < count; i++) {
-                    spawnAt(species, pos[0], pos[1], SPAWN_RADIUS_PLAYER_M);
+                    spawnAt(species, pos[0], pos[1], SPAWN_RADIUS_PLAYER_M, playerBiome);
                     spawned++;
                 }
             }
@@ -76,8 +78,9 @@ public class SpawnScheduler {
         try {
             List<PokemonSpecies> species = db.getAllSpecies();
             if (species.isEmpty()) return;
+            String biome = GeospatialUtils.detectBiome(lat, lng);
             int count = 1 + RNG.nextInt(2);
-            for (int i = 0; i < count; i++) spawnAt(species, lat, lng, radiusM);
+            for (int i = 0; i < count; i++) spawnAt(species, lat, lng, radiusM, biome);
         } catch (Exception e) {
             System.err.println("[SpawnScheduler] On-demand spawn error: " + e.getMessage());
         }
@@ -88,10 +91,6 @@ public class SpawnScheduler {
         double[] pos = GeospatialUtils.randomOffset(lat, lng, radius);
         Instant expires = Instant.now().plusSeconds(SPAWN_DURATION_MIN * 60L);
         db.insertSpawn(chosen.getId(), pos[0], pos[1], expires);
-    }
-
-    private void spawnAt(List<PokemonSpecies> species, double lat, double lng, double radius) throws Exception {
-        spawnAt(species, lat, lng, radius, "NORMAL");
     }
 
     private PokemonSpecies pickBiomeWeightedSpecies(List<PokemonSpecies> all, String biome) {
