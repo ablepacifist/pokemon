@@ -39,11 +39,24 @@ public class CatchService {
     @Autowired
     private MoveService moveService;
 
+    @Autowired
+    private BattleService battleService;
+
     /**
      * Returns the caught Pokemon if successful, null if failed, throws if invalid.
      */
     public CaughtPokemon attemptCatch(int playerId, long spawnId, double playerLat,
                                       double playerLng, String ballType, String berry) throws Exception {
+        return attemptCatch(playerId, spawnId, playerLat, playerLng, ballType, berry, null);
+    }
+
+    /**
+     * Catch attempt, optionally coming from a battle (battleId). A battle weakens
+     * the wild Pokemon, so its remaining HP grants a catch-rate bonus.
+     */
+    public CaughtPokemon attemptCatch(int playerId, long spawnId, double playerLat,
+                                      double playerLng, String ballType, String berry,
+                                      Long battleId) throws Exception {
         PokemonSpawn spawn = db.getSpawnById(spawnId);
         if (spawn == null) throw new IllegalArgumentException("Spawn not found");
         if (spawn.getCaughtByPlayer() != null) throw new IllegalStateException("Already caught");
@@ -61,6 +74,12 @@ public class CatchService {
         PokemonSpecies species = db.getSpeciesById(spawn.getSpeciesId());
         double rate = BASE_CATCH_RATE[Math.min(species.getRarity(), 5)]
                     * BALL_MULTIPLIER.getOrDefault(ballType, 1.0);
+
+        // Battle-weakened Pokemon are easier to catch (HP-based multiplier from the session).
+        if (battleId != null) {
+            double battleBonus = battleService.getCatchBonus(playerId, battleId);
+            rate = Math.min(rate * battleBonus, 1.0);
+        }
 
         boolean doubleCandy = false;
         if (berry != null && !berry.isBlank()) {
@@ -80,10 +99,19 @@ public class CatchService {
 
         db.markSpawnCaught(spawnId, playerId);
 
-        // Assign level based on rarity
-        int rarity = Math.min(species.getRarity(), 5);
-        int[] range = LEVEL_RANGE[rarity];
-        int level = Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
+        // Catch came from a battle → close out that battle session.
+        if (battleId != null) {
+            try { battleService.endBattle(playerId, battleId); } catch (Exception ignored) {}
+        }
+
+        // Level comes from the spawn (set at spawn time) so it matches what the
+        // map showed and any battle used. Fall back to a rarity roll for old spawns.
+        int level = spawn.getLevel();
+        if (level <= 0) {
+            int rarity = Math.min(species.getRarity(), 5);
+            int[] range = LEVEL_RANGE[rarity];
+            level = Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
+        }
 
         // Compute stats: baseStat * (level + 50) / 100 with ±15% IV variance
         double iv = 0.85 + RNG.nextDouble() * 0.30;
