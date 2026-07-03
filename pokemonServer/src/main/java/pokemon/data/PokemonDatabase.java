@@ -38,6 +38,7 @@ public class PokemonDatabase {
         seedLearnsets();
         seedEvolutions();
         seedStarterItems();
+        backfillCaughtMovesets();
     }
 
     public static Connection getConnection() throws SQLException {
@@ -72,7 +73,8 @@ public class PokemonDatabase {
                     LNG DOUBLE,
                     SPAWNED_AT TIMESTAMP,
                     EXPIRES_AT TIMESTAMP,
-                    CAUGHT_BY_PLAYER INT
+                    CAUGHT_BY_PLAYER INT,
+                    LEVEL INT DEFAULT 0
                 )""");
 
             s.execute("""
@@ -82,6 +84,7 @@ public class PokemonDatabase {
                     SPECIES_ID INT,
                     POKEMON_LEVEL INT DEFAULT 1,
                     HP INT,
+                    CURRENT_HP INT,
                     ATTACK INT,
                     DEFENSE INT,
                     SP_ATK INT DEFAULT 0,
@@ -149,8 +152,29 @@ public class PokemonDatabase {
                     CATEGORY VARCHAR(10),
                     POWER INT DEFAULT 0,
                     ACCURACY INT DEFAULT 0,
-                    PP INT DEFAULT 35
+                    PP INT DEFAULT 35,
+                    PRIORITY INT DEFAULT 0,
+                    MIN_HITS INT DEFAULT 1,
+                    MAX_HITS INT DEFAULT 1,
+                    AILMENT VARCHAR(12),
+                    AILMENT_CHANCE INT DEFAULT 0,
+                    CRIT_RATE INT DEFAULT 0,
+                    DRAIN INT DEFAULT 0,
+                    HEALING INT DEFAULT 0,
+                    FLINCH_CHANCE INT DEFAULT 0,
+                    STAT_CHANCE INT DEFAULT 0,
+                    TARGET VARCHAR(6),
+                    STAT_CHANGES VARCHAR(60)
                 )""");
+            // Migrate existing DBs that have the old 7-column POKEMON_MOVES schema.
+            for (String col : new String[] {
+                    "PRIORITY INT DEFAULT 0", "MIN_HITS INT DEFAULT 1", "MAX_HITS INT DEFAULT 1",
+                    "AILMENT VARCHAR(12)", "AILMENT_CHANCE INT DEFAULT 0", "CRIT_RATE INT DEFAULT 0",
+                    "DRAIN INT DEFAULT 0", "HEALING INT DEFAULT 0", "FLINCH_CHANCE INT DEFAULT 0",
+                    "STAT_CHANCE INT DEFAULT 0", "TARGET VARCHAR(6)", "STAT_CHANGES VARCHAR(60)" }) {
+                try { s.execute("ALTER TABLE POKEMON_MOVES ADD COLUMN IF NOT EXISTS " + col); }
+                catch (SQLException ignored) { /* older HSQLDB without IF NOT EXISTS — column may exist */ }
+            }
 
             s.execute("""
                 CREATE TABLE IF NOT EXISTS POKEMON_LEARNSET (
@@ -190,9 +214,14 @@ public class PokemonDatabase {
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN POKEMON_EXP BIGINT DEFAULT 0");
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN POKEMON_IV DOUBLE DEFAULT 0.95");
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN FAVOURITE BOOLEAN DEFAULT FALSE");
+            // Persistent battle HP: current HP separate from the computed max (HP column).
+            runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN CURRENT_HP INT");
+            runSilent(s, "UPDATE CAUGHT_POKEMON SET CURRENT_HP = HP WHERE CURRENT_HP IS NULL");
             runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN STARDUST INT DEFAULT 0");
             runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN BIOME VARCHAR(20) DEFAULT 'NORMAL'");
             runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN LURE_EXPIRES_AT TIMESTAMP");
+            // Wild spawns carry a fixed level (shown on map, used by catch + battle).
+            runSilent(s, "ALTER TABLE POKEMON_SPAWNS ADD COLUMN LEVEL INT DEFAULT 0");
             conn.commit();
         } catch (Exception e) {
             System.err.println("Schema migration warning: " + e.getMessage());
@@ -358,15 +387,29 @@ public class PokemonDatabase {
         }
     }
 
-    public void insertSpawn(int speciesId, double lat, double lng, Instant expiresAt) throws SQLException {
+    public void insertSpawn(int speciesId, double lat, double lng, Instant expiresAt, int level) throws SQLException {
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO POKEMON_SPAWNS (SPECIES_ID,LAT,LNG,SPAWNED_AT,EXPIRES_AT) VALUES (?,?,?,?,?)")) {
+                "INSERT INTO POKEMON_SPAWNS (SPECIES_ID,LAT,LNG,SPAWNED_AT,EXPIRES_AT,LEVEL) VALUES (?,?,?,?,?,?)")) {
             ps.setInt(1, speciesId);
             ps.setDouble(2, lat);
             ps.setDouble(3, lng);
             ps.setTimestamp(4, Timestamp.from(Instant.now()));
             ps.setTimestamp(5, Timestamp.from(expiresAt));
+            ps.setInt(6, level);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    /** Persist a caught Pokemon's current battle HP (clamped to [0, max]). */
+    public void updateCurrentHp(long caughtId, int playerId, int currentHp) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE CAUGHT_POKEMON SET CURRENT_HP = ? WHERE ID = ? AND PLAYER_ID = ?")) {
+            ps.setInt(1, Math.max(0, currentHp));
+            ps.setLong(2, caughtId);
+            ps.setInt(3, playerId);
             ps.executeUpdate();
             conn.commit();
         }
@@ -386,25 +429,26 @@ public class PokemonDatabase {
     public long insertCaughtPokemon(CaughtPokemon p) throws SQLException {
         String sql = """
             INSERT INTO CAUGHT_POKEMON
-            (PLAYER_ID,SPECIES_ID,POKEMON_LEVEL,HP,ATTACK,DEFENSE,SP_ATK,SP_DEF,SPEED,
+            (PLAYER_ID,SPECIES_ID,POKEMON_LEVEL,HP,CURRENT_HP,ATTACK,DEFENSE,SP_ATK,SP_DEF,SPEED,
              CAUGHT_AT,CAUGHT_LAT,CAUGHT_LNG,POKEMON_EXP,POKEMON_IV)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""";
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""";
         try (Connection conn = getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setInt(1, p.getPlayerId());
             ps.setInt(2, p.getSpeciesId());
             ps.setInt(3, p.getPokemonLevel());
             ps.setInt(4, p.getHp());
-            ps.setInt(5, p.getAttack());
-            ps.setInt(6, p.getDefense());
-            ps.setInt(7, p.getSpAtk());
-            ps.setInt(8, p.getSpDef());
-            ps.setInt(9, p.getSpeed());
-            ps.setTimestamp(10, Timestamp.from(Instant.now()));
-            ps.setDouble(11, p.getCaughtLat());
-            ps.setDouble(12, p.getCaughtLng());
-            ps.setLong(13, p.getExp());
-            ps.setDouble(14, p.getIv() > 0 ? p.getIv() : 0.95);
+            ps.setInt(5, p.getHp());      // CURRENT_HP starts at full
+            ps.setInt(6, p.getAttack());
+            ps.setInt(7, p.getDefense());
+            ps.setInt(8, p.getSpAtk());
+            ps.setInt(9, p.getSpDef());
+            ps.setInt(10, p.getSpeed());
+            ps.setTimestamp(11, Timestamp.from(Instant.now()));
+            ps.setDouble(12, p.getCaughtLat());
+            ps.setDouble(13, p.getCaughtLng());
+            ps.setLong(14, p.getExp());
+            ps.setDouble(15, p.getIv() > 0 ? p.getIv() : 0.95);
             ps.executeUpdate();
             conn.commit();
             ResultSet keys = ps.getGeneratedKeys();
@@ -499,14 +543,19 @@ public class PokemonDatabase {
             int spDef = statAtLvl(bSpD, newLevel, iv);
             int speed = statAtLvl(bSpd, newLevel, iv);
 
+            // Leveling up raises current HP by the max-HP gain (not a free full heal),
+            // and never revives a fainted Pokemon (current HP stays 0 until revived).
+            int hpDelta = Math.max(0, hp - p.getHp());
+            int newCurrent = p.getCurrentHp() <= 0 ? 0 : Math.min(hp, p.getCurrentHp() + hpDelta);
+
             try (Connection conn = getConnection();
                  PreparedStatement ps = conn.prepareStatement("""
                     UPDATE CAUGHT_POKEMON
-                    SET POKEMON_LEVEL=?,HP=?,ATTACK=?,DEFENSE=?,SP_ATK=?,SP_DEF=?,SPEED=?,POKEMON_EXP=?
+                    SET POKEMON_LEVEL=?,HP=?,CURRENT_HP=?,ATTACK=?,DEFENSE=?,SP_ATK=?,SP_DEF=?,SPEED=?,POKEMON_EXP=?
                     WHERE ID=? AND PLAYER_ID=?""")) {
-                ps.setInt(1, newLevel); ps.setInt(2, hp);  ps.setInt(3, atk);  ps.setInt(4, def);
-                ps.setInt(5, spAtk);   ps.setInt(6, spDef); ps.setInt(7, speed); ps.setLong(8, newExp);
-                ps.setLong(9, caughtId); ps.setInt(10, playerId);
+                ps.setInt(1, newLevel); ps.setInt(2, hp); ps.setInt(3, newCurrent); ps.setInt(4, atk); ps.setInt(5, def);
+                ps.setInt(6, spAtk);   ps.setInt(7, spDef); ps.setInt(8, speed); ps.setLong(9, newExp);
+                ps.setLong(10, caughtId); ps.setInt(11, playerId);
                 ps.executeUpdate();
                 conn.commit();
             }
@@ -563,7 +612,28 @@ public class PokemonDatabase {
             ResultSet rs = ps.executeQuery();
             while (rs.next()) list.add(mapCaught(rs));
         }
+        attachMoves(list, playerId);
         return list;
+    }
+
+    /** One grouped query to attach each caught Pokemon's moveset (avoids N+1). */
+    private void attachMoves(List<CaughtPokemon> list, int playerId) throws SQLException {
+        if (list.isEmpty()) return;
+        java.util.Map<Long, CaughtPokemon> byId = new java.util.HashMap<>();
+        for (CaughtPokemon p : list) { p.setMoves(new ArrayList<>()); byId.put(p.getId(), p); }
+        String sql = """
+            SELECT cpm.CAUGHT_ID, m.*, cpm.SLOT FROM POKEMON_MOVES m
+            JOIN CAUGHT_POKEMON_MOVES cpm ON m.ID = cpm.MOVE_ID
+            JOIN CAUGHT_POKEMON cp ON cpm.CAUGHT_ID = cp.ID
+            WHERE cp.PLAYER_ID = ? ORDER BY cpm.CAUGHT_ID, cpm.SLOT""";
+        try (Connection conn = getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) {
+                CaughtPokemon p = byId.get(rs.getLong("CAUGHT_ID"));
+                if (p != null) p.getMoves().add(mapMove(rs));
+            }
+        }
     }
 
     /** Returns distinct species IDs that this player has caught at least once. */
@@ -861,35 +931,60 @@ public class PokemonDatabase {
     // ── Move seeding ─────────────────────────────────────────────────────────
 
     private void seedMoves() {
+        int csvCount = countCsvRows("moves.csv");
         try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM POKEMON_MOVES");
             rs.next();
-            if (rs.getInt(1) > 0) return;
+            int dbCount = rs.getInt(1);
+            if (dbCount == csvCount && dbCount > 0) return;
+            System.out.println("[PokemonDB] Move count mismatch (DB=" + dbCount
+                + " CSV=" + csvCount + ") — re-seeding moves...");
+            st.execute("DELETE FROM POKEMON_MOVES");
+            conn.commit();
         } catch (SQLException e) { System.err.println("Move seed check failed: " + e.getMessage()); return; }
 
         try (var in = getClass().getClassLoader().getResourceAsStream("moves.csv");
              var reader = new BufferedReader(new InputStreamReader(in));
              Connection conn = getConnection()) {
             PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO POKEMON_MOVES (ID,NAME,TYPE,CATEGORY,POWER,ACCURACY,PP) VALUES (?,?,?,?,?,?,?)");
+                "INSERT INTO POKEMON_MOVES (ID,NAME,TYPE,CATEGORY,POWER,ACCURACY,PP,PRIORITY,"
+                + "MIN_HITS,MAX_HITS,AILMENT,AILMENT_CHANCE,CRIT_RATE,DRAIN,HEALING,FLINCH_CHANCE,"
+                + "STAT_CHANCE,TARGET,STAT_CHANGES) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
             String line; boolean header = true;
             while ((line = reader.readLine()) != null) {
                 if (header) { header = false; continue; }
-                String[] p = line.split(",", 7);
-                if (p.length < 7) continue;
+                // 19 columns; STAT_CHANGES (last) may be empty but present.
+                String[] p = line.split(",", -1);
+                if (p.length < 19) continue;
                 ps.setInt(1, Integer.parseInt(p[0].trim()));
                 ps.setString(2, p[1].trim());
                 ps.setString(3, p[2].trim());
                 ps.setString(4, p[3].trim());
-                ps.setInt(5, Integer.parseInt(p[4].trim()));
-                ps.setInt(6, Integer.parseInt(p[5].trim()));
-                ps.setInt(7, Integer.parseInt(p[6].trim()));
+                ps.setInt(5, pInt(p[4]));
+                ps.setInt(6, pInt(p[5]));
+                ps.setInt(7, pInt(p[6]));
+                ps.setInt(8, pInt(p[7]));
+                ps.setInt(9, pInt(p[8]));
+                ps.setInt(10, pInt(p[9]));
+                ps.setString(11, p[10].trim().isEmpty() ? null : p[10].trim());
+                ps.setInt(12, pInt(p[11]));
+                ps.setInt(13, pInt(p[12]));
+                ps.setInt(14, pInt(p[13]));
+                ps.setInt(15, pInt(p[14]));
+                ps.setInt(16, pInt(p[15]));
+                ps.setInt(17, pInt(p[16]));
+                ps.setString(18, p[17].trim().isEmpty() ? null : p[17].trim());
+                ps.setString(19, p[18].trim().isEmpty() ? null : p[18].trim());
                 ps.addBatch();
             }
             ps.executeBatch();
             conn.commit();
-            System.out.println("Pokemon moves seeded.");
+            System.out.println("[PokemonDB] Seeded " + csvCount + " moves (Gen 1-7, with battle effects).");
         } catch (Exception e) { System.err.println("Move seeding failed: " + e.getMessage()); }
+    }
+
+    private static int pInt(String s) {
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
     }
 
     private void seedLearnsets() {
@@ -924,6 +1019,73 @@ public class PokemonDatabase {
             conn.commit();
             System.out.println("[PokemonDB] Seeded " + csvCount + " learnset entries (Gen 1, pokemondb.net accurate).");
         } catch (Exception e) { System.err.println("Learnset seeding failed: " + e.getMessage()); }
+    }
+
+    /**
+     * One-time, idempotent migration: fill EMPTY move slots for already-caught
+     * Pokemon using their species learnset at their current level. Never overwrites
+     * an existing move. Fixes older catches that have sparse movesets (e.g. caught
+     * before full Gen 1-7 learnsets were loaded). A no-op once a Pokemon has 4 moves.
+     */
+    private void backfillCaughtMovesets() {
+        int filled = 0, touched = 0;
+        try (Connection conn = getConnection()) {
+            // Caught Pokemon with fewer than 4 moves.
+            List<long[]> needy = new ArrayList<>(); // {caughtId, speciesId, level, moveCount}
+            String q = """
+                SELECT c.ID, c.SPECIES_ID, c.POKEMON_LEVEL, COUNT(cpm.SLOT) AS CNT
+                FROM CAUGHT_POKEMON c
+                LEFT JOIN CAUGHT_POKEMON_MOVES cpm ON c.ID = cpm.CAUGHT_ID
+                GROUP BY c.ID, c.SPECIES_ID, c.POKEMON_LEVEL
+                HAVING COUNT(cpm.SLOT) < 4""";
+            try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(q)) {
+                while (rs.next())
+                    needy.add(new long[]{ rs.getLong("ID"), rs.getInt("SPECIES_ID"), rs.getInt("POKEMON_LEVEL"), rs.getLong("CNT") });
+            }
+            if (needy.isEmpty()) return;
+
+            for (long[] n : needy) {
+                long caughtId = n[0]; int speciesId = (int) n[1]; int level = (int) n[2];
+
+                // Existing move ids + used slots.
+                java.util.Set<Integer> known = new HashSet<>();
+                java.util.Set<Integer> usedSlots = new HashSet<>();
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT MOVE_ID, SLOT FROM CAUGHT_POKEMON_MOVES WHERE CAUGHT_ID=?")) {
+                    ps.setLong(1, caughtId);
+                    ResultSet rs = ps.executeQuery();
+                    while (rs.next()) { known.add(rs.getInt(1)); usedSlots.add(rs.getInt(2)); }
+                }
+
+                // Candidate moves: latest learnable by this level, not already known.
+                List<pokemon.object.PokemonMove> learn = getLearnsetUpToLevel(speciesId, level);
+                java.util.LinkedHashSet<Integer> candidates = new java.util.LinkedHashSet<>();
+                for (int i = learn.size() - 1; i >= 0; i--) {       // latest first
+                    int mid = learn.get(i).getId();
+                    if (!known.contains(mid)) candidates.add(mid);
+                }
+                if (candidates.isEmpty()) continue;
+
+                java.util.Iterator<Integer> it = candidates.iterator();
+                boolean any = false;
+                for (int slot = 1; slot <= 4 && it.hasNext(); slot++) {
+                    if (usedSlots.contains(slot)) continue;
+                    int mid = it.next();
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT INTO CAUGHT_POKEMON_MOVES (CAUGHT_ID,MOVE_ID,SLOT) VALUES (?,?,?)")) {
+                        ins.setLong(1, caughtId); ins.setInt(2, mid); ins.setInt(3, slot);
+                        ins.executeUpdate();
+                        filled++; any = true;
+                    }
+                }
+                if (any) touched++;
+            }
+            conn.commit();
+            if (filled > 0)
+                System.out.println("[PokemonDB] Backfilled " + filled + " move(s) across " + touched + " existing Pokemon.");
+        } catch (Exception e) {
+            System.err.println("Moveset backfill failed: " + e.getMessage());
+        }
     }
 
     private void seedEvolutions() {
@@ -1072,6 +1234,19 @@ public class PokemonDatabase {
         m.setAccuracy(rs.getInt("ACCURACY"));
         m.setPp(rs.getInt("PP"));
         try { m.setSlot(rs.getInt("SLOT")); } catch (SQLException ignored) {}
+        // Battle-effect columns (absent in older schemas — guard each).
+        try { m.setPriority(rs.getInt("PRIORITY")); } catch (SQLException ignored) {}
+        try { int v = rs.getInt("MIN_HITS"); m.setMinHits(v <= 0 ? 1 : v); } catch (SQLException ignored) {}
+        try { int v = rs.getInt("MAX_HITS"); m.setMaxHits(v <= 0 ? 1 : v); } catch (SQLException ignored) {}
+        try { m.setAilment(rs.getString("AILMENT")); } catch (SQLException ignored) {}
+        try { m.setAilmentChance(rs.getInt("AILMENT_CHANCE")); } catch (SQLException ignored) {}
+        try { m.setCritRate(rs.getInt("CRIT_RATE")); } catch (SQLException ignored) {}
+        try { m.setDrain(rs.getInt("DRAIN")); } catch (SQLException ignored) {}
+        try { m.setHealing(rs.getInt("HEALING")); } catch (SQLException ignored) {}
+        try { m.setFlinchChance(rs.getInt("FLINCH_CHANCE")); } catch (SQLException ignored) {}
+        try { m.setStatChance(rs.getInt("STAT_CHANCE")); } catch (SQLException ignored) {}
+        try { m.setTarget(rs.getString("TARGET")); } catch (SQLException ignored) {}
+        try { m.setStatChanges(rs.getString("STAT_CHANGES")); } catch (SQLException ignored) {}
         return m;
     }
 
@@ -1175,6 +1350,7 @@ public class PokemonDatabase {
         if (!rs.wasNull()) s.setCaughtByPlayer(caughtBy);
         try { s.setSpeciesName(rs.getString("NAME")); } catch (SQLException ignored) {}
         try { s.setSpriteKey(rs.getString("SPRITE_KEY")); } catch (SQLException ignored) {}
+        try { s.setLevel(rs.getInt("LEVEL")); } catch (SQLException ignored) {}
         return s;
     }
 
@@ -1185,6 +1361,10 @@ public class PokemonDatabase {
         c.setSpeciesId(rs.getInt("SPECIES_ID"));
         c.setPokemonLevel(rs.getInt("POKEMON_LEVEL"));
         c.setHp(rs.getInt("HP"));
+        try {
+            int cur = rs.getInt("CURRENT_HP");
+            c.setCurrentHp(rs.wasNull() ? rs.getInt("HP") : cur);
+        } catch (SQLException ignored) { c.setCurrentHp(rs.getInt("HP")); }
         c.setAttack(rs.getInt("ATTACK"));
         c.setDefense(rs.getInt("DEFENSE"));
         c.setSpAtk(rs.getInt("SP_ATK"));

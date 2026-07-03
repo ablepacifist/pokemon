@@ -25,6 +25,11 @@ public class SpawnScheduler {
     // Rarity thresholds: roll 1-100 → rarity tier
     private static final int[] RARITY_THRESHOLDS = {0, 60, 85, 95, 99, 100};
 
+    // Wild level ranges per rarity: {minLevel, randomRange}
+    private static final int[][] LEVEL_RANGE = {
+        {0, 0}, {1, 11}, {3, 13}, {8, 13}, {15, 19}, {30, 20}
+    };
+
     @Autowired
     private PokemonDatabase db;
 
@@ -90,7 +95,14 @@ public class SpawnScheduler {
         PokemonSpecies chosen = pickBiomeWeightedSpecies(species, biome);
         double[] pos = GeospatialUtils.randomOffset(lat, lng, radius);
         Instant expires = Instant.now().plusSeconds(SPAWN_DURATION_MIN * 60L);
-        db.insertSpawn(chosen.getId(), pos[0], pos[1], expires);
+        db.insertSpawn(chosen.getId(), pos[0], pos[1], expires, rollLevel(chosen.getRarity()));
+    }
+
+    /** Wild level from rarity (single source of truth — catch + battle read spawn.level). */
+    private int rollLevel(int rarity) {
+        int r = Math.min(Math.max(rarity, 1), 5);
+        int[] range = LEVEL_RANGE[r];
+        return Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
     }
 
     private PokemonSpecies pickBiomeWeightedSpecies(List<PokemonSpecies> all, String biome) {

@@ -12,6 +12,7 @@ public class PokemonSpawn {
     private Instant spawnedAt;
     private Instant expiresAt;
     private Integer caughtByPlayer;
+    private int level;
 
     public PokemonSpawn() {}
 
@@ -33,4 +34,6 @@ public class PokemonSpawn {
     public void setExpiresAt(Instant expiresAt) { this.expiresAt = expiresAt; }
     public Integer getCaughtByPlayer() { return caughtByPlayer; }
     public void setCaughtByPlayer(Integer caughtByPlayer) { this.caughtByPlayer = caughtByPlayer; }
+    public int getLevel() { return level; }
+    public void setLevel(int level) { this.level = level; }
 }

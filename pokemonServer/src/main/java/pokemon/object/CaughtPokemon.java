@@ -11,7 +11,8 @@ public class CaughtPokemon {
     private String type1;
     private String type2;
     private int pokemonLevel;
-    private int hp;
+    private int hp;          // max HP (computed stat)
+    private int currentHp;   // persistent battle HP; 0 = fainted
     private int attack;
     private int defense;
     private int spAtk;
@@ -24,6 +25,7 @@ public class CaughtPokemon {
     private long   exp;
     private double iv;
     private boolean favourite;
+    private java.util.List<PokemonMove> moves;
     // transient base stats — populated only by getCaughtById, not stored in CAUGHT_POKEMON
     private transient int baseHpForGrind, baseAtkForGrind, baseDefForGrind;
     private transient int baseSpAtkForGrind, baseSpDefForGrind, baseSpeedForGrind;
@@ -48,6 +50,8 @@ public class CaughtPokemon {
     public void setPokemonLevel(int pokemonLevel) { this.pokemonLevel = pokemonLevel; }
     public int getHp() { return hp; }
     public void setHp(int hp) { this.hp = hp; }
+    public int getCurrentHp() { return currentHp; }
+    public void setCurrentHp(int currentHp) { this.currentHp = currentHp; }
     public int getAttack() { return attack; }
     public void setAttack(int attack) { this.attack = attack; }
     public int getDefense() { return defense; }
@@ -72,6 +76,13 @@ public class CaughtPokemon {
     public void setIv(double iv) { this.iv = iv; }
     public boolean isFavourite() { return favourite; }
     public void setFavourite(boolean favourite) { this.favourite = favourite; }
+    public java.util.List<PokemonMove> getMoves() { return moves; }
+    public void setMoves(java.util.List<PokemonMove> moves) { this.moves = moves; }
+
+    /** Nickname if set, otherwise the species name. */
+    public String displayName() {
+        return (nickname != null && !nickname.isBlank()) ? nickname : speciesName;
+    }
     public int getBaseHpForGrind() { return baseHpForGrind; }
     public void setBaseHpForGrind(int v) { this.baseHpForGrind = v; }
     public int getBaseAtkForGrind() { return baseAtkForGrind; }
