@@ -132,7 +132,30 @@ public class PokemonDatabase {
                     PLAYER_ID INT PRIMARY KEY,
                     XP INT DEFAULT 0,
                     POKE_COINS INT DEFAULT 0,
-                    STARDUST INT DEFAULT 0
+                    STARDUST INT DEFAULT 0,
+                    TOTAL_KM DOUBLE DEFAULT 0,
+                    LAST_WALK_LAT DOUBLE,
+                    LAST_WALK_LNG DOUBLE
+                )""");
+
+            // Eggs: obtained from stops, incubated, hatch after walking DISTANCE_KM.
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS PLAYER_EGGS (
+                    ID BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    PLAYER_ID INT,
+                    DISTANCE_KM DOUBLE,
+                    PROGRESS_KM DOUBLE DEFAULT 0,
+                    INCUBATING BOOLEAN DEFAULT FALSE,
+                    OBTAINED_AT TIMESTAMP
+                )""");
+
+            // Buddy: one Pokemon walks with the player, earning candy per km.
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS PLAYER_BUDDY (
+                    PLAYER_ID INT PRIMARY KEY,
+                    CAUGHT_ID BIGINT,
+                    KM_SINCE_CANDY DOUBLE DEFAULT 0,
+                    KM_PER_CANDY DOUBLE DEFAULT 3
                 )""");
 
             s.execute("""
@@ -218,6 +241,9 @@ public class PokemonDatabase {
             runSilent(s, "ALTER TABLE CAUGHT_POKEMON ADD COLUMN CURRENT_HP INT");
             runSilent(s, "UPDATE CAUGHT_POKEMON SET CURRENT_HP = HP WHERE CURRENT_HP IS NULL");
             runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN STARDUST INT DEFAULT 0");
+            runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN TOTAL_KM DOUBLE DEFAULT 0");
+            runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN LAST_WALK_LAT DOUBLE");
+            runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN LAST_WALK_LNG DOUBLE");
             runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN BIOME VARCHAR(20) DEFAULT 'NORMAL'");
             runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN LURE_EXPIRES_AT TIMESTAMP");
             // Wild spawns carry a fixed level (shown on map, used by catch + battle).
@@ -882,6 +908,177 @@ public class PokemonDatabase {
                 "UPDATE POKEMON_PLAYER_STATS SET POKE_COINS=? WHERE PLAYER_ID=?")) {
             ps.setInt(1, newCoins);
             ps.setInt(2, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    // ── Walk distance state ────────────────────────────────────────────────────
+
+    /** Returns {totalKm, lastLat, lastLng, hasLast(1/0)}. */
+    public double[] getWalkState(int playerId) throws SQLException {
+        getPlayerStats(playerId); // ensure row exists
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT TOTAL_KM, LAST_WALK_LAT, LAST_WALK_LNG FROM POKEMON_PLAYER_STATS WHERE PLAYER_ID=?")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                double total = rs.getDouble("TOTAL_KM");
+                double lat = rs.getDouble("LAST_WALK_LAT"); boolean hasLat = !rs.wasNull();
+                double lng = rs.getDouble("LAST_WALK_LNG"); boolean hasLng = !rs.wasNull();
+                return new double[]{ total, lat, lng, (hasLat && hasLng) ? 1 : 0 };
+            }
+            return new double[]{0, 0, 0, 0};
+        }
+    }
+
+    public void updateWalkState(int playerId, double totalKm, double lat, double lng) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE POKEMON_PLAYER_STATS SET TOTAL_KM=?, LAST_WALK_LAT=?, LAST_WALK_LNG=? WHERE PLAYER_ID=?")) {
+            ps.setDouble(1, totalKm); ps.setDouble(2, lat); ps.setDouble(3, lng); ps.setInt(4, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    // ── Eggs ───────────────────────────────────────────────────────────────────
+
+    public long insertEgg(int playerId, double distanceKm) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO PLAYER_EGGS (PLAYER_ID,DISTANCE_KM,PROGRESS_KM,INCUBATING,OBTAINED_AT) VALUES (?,?,0,FALSE,?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            ps.setInt(1, playerId); ps.setDouble(2, distanceKm);
+            ps.setTimestamp(3, Timestamp.from(Instant.now()));
+            ps.executeUpdate();
+            conn.commit();
+            ResultSet k = ps.getGeneratedKeys();
+            return k.next() ? k.getLong(1) : -1;
+        }
+    }
+
+    public int countEggs(int playerId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM PLAYER_EGGS WHERE PLAYER_ID=?")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    public List<PlayerEgg> getEggs(int playerId) throws SQLException {
+        List<PlayerEgg> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT * FROM PLAYER_EGGS WHERE PLAYER_ID=? ORDER BY INCUBATING DESC, ID ASC")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) list.add(mapEgg(rs));
+        }
+        return list;
+    }
+
+    public List<PlayerEgg> getIncubatingEggs(int playerId) throws SQLException {
+        List<PlayerEgg> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT * FROM PLAYER_EGGS WHERE PLAYER_ID=? AND INCUBATING=TRUE")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) list.add(mapEgg(rs));
+        }
+        return list;
+    }
+
+    public PlayerEgg getEgg(long eggId, int playerId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM PLAYER_EGGS WHERE ID=? AND PLAYER_ID=?")) {
+            ps.setLong(1, eggId); ps.setInt(2, playerId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? mapEgg(rs) : null;
+        }
+    }
+
+    public void setEggIncubating(long eggId, int playerId, boolean incubating) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE PLAYER_EGGS SET INCUBATING=? WHERE ID=? AND PLAYER_ID=?")) {
+            ps.setBoolean(1, incubating); ps.setLong(2, eggId); ps.setInt(3, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void updateEggProgress(long eggId, double progressKm) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE PLAYER_EGGS SET PROGRESS_KM=? WHERE ID=?")) {
+            ps.setDouble(1, progressKm); ps.setLong(2, eggId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void deleteEgg(long eggId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("DELETE FROM PLAYER_EGGS WHERE ID=?")) {
+            ps.setLong(1, eggId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    private PlayerEgg mapEgg(ResultSet rs) throws SQLException {
+        PlayerEgg e = new PlayerEgg();
+        e.setId(rs.getLong("ID"));
+        e.setPlayerId(rs.getInt("PLAYER_ID"));
+        e.setDistanceKm(rs.getDouble("DISTANCE_KM"));
+        e.setProgressKm(rs.getDouble("PROGRESS_KM"));
+        e.setIncubating(rs.getBoolean("INCUBATING"));
+        Timestamp t = rs.getTimestamp("OBTAINED_AT");
+        if (t != null) e.setObtainedAt(t.toInstant());
+        return e;
+    }
+
+    // ── Buddy ──────────────────────────────────────────────────────────────────
+
+    /** Returns {caughtId, kmSinceCandy, kmPerCandy} or null if no buddy set. */
+    public double[] getBuddy(int playerId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT CAUGHT_ID, KM_SINCE_CANDY, KM_PER_CANDY FROM PLAYER_BUDDY WHERE PLAYER_ID=?")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return new double[]{ rs.getLong("CAUGHT_ID"), rs.getDouble("KM_SINCE_CANDY"), rs.getDouble("KM_PER_CANDY") };
+            return null;
+        }
+    }
+
+    public void setBuddy(int playerId, long caughtId, double kmPerCandy) throws SQLException {
+        try (Connection conn = getConnection()) {
+            PreparedStatement chk = conn.prepareStatement("SELECT PLAYER_ID FROM PLAYER_BUDDY WHERE PLAYER_ID=?");
+            chk.setInt(1, playerId);
+            if (chk.executeQuery().next()) {
+                PreparedStatement up = conn.prepareStatement(
+                    "UPDATE PLAYER_BUDDY SET CAUGHT_ID=?, KM_SINCE_CANDY=0, KM_PER_CANDY=? WHERE PLAYER_ID=?");
+                up.setLong(1, caughtId); up.setDouble(2, kmPerCandy); up.setInt(3, playerId);
+                up.executeUpdate();
+            } else {
+                PreparedStatement ins = conn.prepareStatement(
+                    "INSERT INTO PLAYER_BUDDY (PLAYER_ID,CAUGHT_ID,KM_SINCE_CANDY,KM_PER_CANDY) VALUES (?,?,0,?)");
+                ins.setInt(1, playerId); ins.setLong(2, caughtId); ins.setDouble(3, kmPerCandy);
+                ins.executeUpdate();
+            }
+            conn.commit();
+        }
+    }
+
+    public void updateBuddyProgress(int playerId, double kmSinceCandy) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE PLAYER_BUDDY SET KM_SINCE_CANDY=? WHERE PLAYER_ID=?")) {
+            ps.setDouble(1, kmSinceCandy); ps.setInt(2, playerId);
             ps.executeUpdate();
             conn.commit();
         }

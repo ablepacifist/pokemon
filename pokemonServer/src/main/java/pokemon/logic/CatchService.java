@@ -148,9 +148,8 @@ public class CatchService {
         // Assign the moves this Pokemon knows at its catch level
         try { moveService.assignInitialMoves(id, species.getId(), level); } catch (Exception ignored) {}
 
-        // XP + stardust + generic candy for catching
+        // XP + generic candy for catching
         try { db.addXp(playerId, species.getRarity() * 100); } catch (Exception ignored) {}
-        try { db.addStardust(playerId, 20 + RNG.nextInt(31)); } catch (Exception ignored) {} // 20-50 stardust
         try { db.adjustItem(playerId, "CANDY_XS", doubleCandy ? 6 : 3); } catch (Exception ignored) {}
 
         return caught;

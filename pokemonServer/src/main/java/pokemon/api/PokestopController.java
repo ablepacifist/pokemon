@@ -6,6 +6,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import pokemon.data.PokemonDatabase;
+import pokemon.logic.EggService;
 import pokemon.logic.GeospatialUtils;
 import pokemon.object.Pokestop;
 
@@ -23,6 +24,9 @@ public class PokestopController {
 
     @Autowired
     private PokemonDatabase db;
+
+    @Autowired
+    private EggService eggService;
 
     @GetMapping("/pokestops/nearby")
     public ResponseEntity<?> nearby(
@@ -80,12 +84,20 @@ public class PokestopController {
             db.adjustItem(playerId, item, qty);
             db.spinPokestop(stopId, playerId);
             try { db.addXp(playerId, 50); } catch (Exception ignored) {}
-            try { db.addStardust(playerId, 50 + RNG.nextInt(51)); } catch (Exception ignored) {} // 50-100 stardust
 
+            // ~8% chance to also find an egg (if the player has room; egg bag caps at 9).
+            double eggKm = 0;
+            if (RNG.nextInt(12) == 0) {
+                try { eggKm = eggService.giveRandomEgg(playerId); } catch (Exception ignored) {}
+            }
+
+            String message = "Got " + qty + "× " + item.replace("_", " ") + "!";
+            if (eggKm > 0) message += " Plus a " + (int) eggKm + "km Egg!";
             return ResponseEntity.ok(Map.of(
                 "item", item,
                 "quantity", qty,
-                "message", "Got " + qty + "× " + item.replace("_", " ") + "!"
+                "egg", eggKm,
+                "message", message
             ));
         } catch (Exception e) {
             return ResponseEntity.status(500).body("Error: " + e.getMessage());
