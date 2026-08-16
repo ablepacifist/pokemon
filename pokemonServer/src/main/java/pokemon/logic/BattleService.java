@@ -41,6 +41,9 @@ public class BattleService {
     @Autowired
     private PokemonDatabase db;
 
+    @Autowired
+    private CombatEngine combat;
+
     // ── Session lifecycle ──────────────────────────────────────────────────────
 
     public BattleState startBattle(int playerId, long spawnId, long caughtId,
@@ -191,12 +194,13 @@ public class BattleService {
         s.resetLog();
         s.touch();
 
-        PokemonMove playerMove = findMove(s.getPlayer(), moveId);
+        PokemonMove playerMove = combat.findMove(s.getPlayer(), moveId);
         if (playerMove == null) throw new IllegalArgumentException("That Pokemon doesn't know that move");
-        PokemonMove wildMove = chooseWildMove(s.getWild(), s.getPlayer());
+        PokemonMove wildMove = combat.chooseAiMove(s.getWild(), s.getPlayer());
 
-        resolveOrderedTurn(s, playerMove, wildMove);
-        endOfTurn(s);
+        combat.resolveTurn(s.getPlayer(), playerMove, s.getWild(), wildMove, s.getLog());
+        combat.endOfTurnTicks(s.getPlayer(), s.getWild(), s.getLog());
+        resolveOutcome(s);
         s.incrementTurn();
         persistPlayerHp(s);
         return s;
@@ -219,9 +223,10 @@ public class BattleService {
         s.addLog("Go, " + next.getName() + "!");
 
         // Wild attacks the newly sent-out Pokemon.
-        PokemonMove wildMove = chooseWildMove(s.getWild(), s.getPlayer());
-        if (canAct(s.getWild(), s)) executeMove(s, s.getWild(), s.getPlayer(), wildMove, false);
-        endOfTurn(s);
+        PokemonMove wildMove = combat.chooseAiMove(s.getWild(), s.getPlayer());
+        if (combat.canAct(s.getWild(), s.getLog())) combat.executeMove(s.getWild(), s.getPlayer(), wildMove, s.getLog());
+        combat.endOfTurnTicks(s.getPlayer(), s.getWild(), s.getLog());
+        resolveOutcome(s);
         s.incrementTurn();
         persistPlayerHp(s);
         return s;
@@ -243,263 +248,14 @@ public class BattleService {
             sessions.remove(battleId);
         } else {
             s.addLog("Can't escape!");
-            PokemonMove wildMove = chooseWildMove(s.getWild(), s.getPlayer());
-            if (canAct(s.getWild(), s)) executeMove(s, s.getWild(), s.getPlayer(), wildMove, false);
-            endOfTurn(s);
+            PokemonMove wildMove = combat.chooseAiMove(s.getWild(), s.getPlayer());
+            if (combat.canAct(s.getWild(), s.getLog())) combat.executeMove(s.getWild(), s.getPlayer(), wildMove, s.getLog());
+            combat.endOfTurnTicks(s.getPlayer(), s.getWild(), s.getLog());
+            resolveOutcome(s);
             s.incrementTurn();
         }
         persistPlayerHp(s);
         return s;
-    }
-
-    // ── Turn resolution ────────────────────────────────────────────────────────
-
-    private void resolveOrderedTurn(BattleState s, PokemonMove playerMove, PokemonMove wildMove) {
-        BattleCombatant player = s.getPlayer();
-        BattleCombatant wild   = s.getWild();
-
-        player.setFlinched(false);
-        wild.setFlinched(false);
-
-        // Order: higher move priority first; tie broken by effective speed; then random.
-        boolean playerFirst;
-        if (playerMove.getPriority() != wildMove.getPriority()) {
-            playerFirst = playerMove.getPriority() > wildMove.getPriority();
-        } else {
-            int pSpeed = effectiveSpeed(player);
-            int wSpeed = effectiveSpeed(wild);
-            if (pSpeed != wSpeed) playerFirst = pSpeed > wSpeed;
-            else                  playerFirst = RNG.nextBoolean();
-        }
-
-        BattleCombatant firstC  = playerFirst ? player : wild;
-        BattleCombatant secondC = playerFirst ? wild : player;
-        PokemonMove firstM  = playerFirst ? playerMove : wildMove;
-        PokemonMove secondM = playerFirst ? wildMove : playerMove;
-
-        if (canAct(firstC, s)) executeMove(s, firstC, secondC, firstM, playerFirst);
-        if (secondC.isFainted() || firstC.isFainted()) return;
-        if (secondC.isFlinched()) { s.addLog(secondC.getName() + " flinched and couldn't move!"); return; }
-        if (canAct(secondC, s)) executeMove(s, secondC, firstC, secondM, !playerFirst);
-    }
-
-    /** Executes one combatant's move against the other, applying damage + effects. */
-    private void executeMove(BattleState s, BattleCombatant attacker, BattleCombatant defender,
-                             PokemonMove move, boolean attackerIsPlayer) {
-        if (defender.isFainted() || attacker.isFainted()) return;
-
-        s.addLog(attacker.getName() + " used " + move.getName() + "!");
-
-        // Accuracy check (0 accuracy in data = always hits, e.g. self-buffs).
-        if (move.getAccuracy() > 0) {
-            double acc = move.getAccuracy()
-                       * accStageMult(attacker.getStage(5))
-                       / accStageMult(defender.getStage(6));
-            if (RNG.nextDouble() * 100 > acc) {
-                s.addLog(attacker.getName() + "'s attack missed!");
-                return;
-            }
-        }
-
-        int totalDealt = 0;
-        if (move.getPower() > 0) {
-            double typeMult = TypeChart.multiplier(move.getType(), defender.getType1(), defender.getType2());
-            if (typeMult == 0.0) {
-                s.addLog("It had no effect on " + defender.getName() + "...");
-                return;
-            }
-            int hits = rollHitCount(move);
-            boolean crit = false;
-            for (int h = 0; h < hits && !defender.isFainted(); h++) {
-                int dmg = computeDamage(attacker, defender, move, typeMult);
-                boolean thisCrit = RNG.nextDouble() < critChance(move);
-                if (thisCrit) { dmg = (int) (dmg * 1.5); crit = true; }
-                dmg = Math.max(1, dmg);
-                defender.setCurHp(defender.getCurHp() - dmg);
-                totalDealt += dmg;
-            }
-            String eff = TypeChart.label(typeMult);
-            String hitNote = hits > 1 ? " Hit " + hits + " times!" : "";
-            s.addLog(defender.getName() + " took " + totalDealt + " damage."
-                + (crit ? " A critical hit!" : "") + (eff.isEmpty() ? "" : " " + eff) + hitNote);
-
-            // Drain (heal a % of damage dealt) or recoil (negative drain).
-            if (move.getDrain() > 0 && totalDealt > 0) {
-                int heal = Math.max(1, totalDealt * move.getDrain() / 100);
-                attacker.setCurHp(attacker.getCurHp() + heal);
-                s.addLog(attacker.getName() + " drained " + heal + " HP!");
-            } else if (move.getDrain() < 0 && totalDealt > 0) {
-                int recoil = Math.max(1, totalDealt * (-move.getDrain()) / 100);
-                attacker.setCurHp(attacker.getCurHp() - recoil);
-                s.addLog(attacker.getName() + " was hit by recoil (" + recoil + ")!");
-            }
-        }
-
-        // Self-healing moves (e.g. Recover, Roost). Negative healing = self-damage.
-        if (move.getHealing() > 0) {
-            int heal = Math.max(1, attacker.getMaxHp() * move.getHealing() / 100);
-            int before = attacker.getCurHp();
-            attacker.setCurHp(attacker.getCurHp() + heal);
-            if (attacker.getCurHp() > before) s.addLog(attacker.getName() + " restored " + (attacker.getCurHp() - before) + " HP!");
-        } else if (move.getHealing() < 0) {
-            int dmg = Math.max(1, attacker.getMaxHp() * (-move.getHealing()) / 100);
-            attacker.setCurHp(attacker.getCurHp() - dmg);
-        }
-
-        applyMoveEffects(s, attacker, defender, move, totalDealt);
-
-        if (defender.isFainted()) s.addLog(defender.getName() + " fainted!");
-        if (attacker.isFainted()) s.addLog(attacker.getName() + " fainted!");
-    }
-
-    /** Standard physical/special damage with STAB and type multiplier (no crit/random-free). */
-    private int computeDamage(BattleCombatant attacker, BattleCombatant defender, PokemonMove move, double typeMult) {
-        boolean physical = "Physical".equalsIgnoreCase(move.getCategory());
-        int atkStat = physical ? effectiveAttack(attacker) : effectiveSpAtk(attacker);
-        int defStat = physical
-            ? Math.max(1, (int) (defender.getDefense() * stageMult(defender.getStage(1))))
-            : Math.max(1, (int) (defender.getSpDef()  * stageMult(defender.getStage(3))));
-        double stab = matchesType(move.getType(), attacker) ? 1.5 : 1.0;
-        double base = ((2.0 * attacker.getLevel() / 5.0 + 2.0) * move.getPower() * atkStat / Math.max(1, defStat)) / 50.0 + 2.0;
-        double rand = 0.85 + RNG.nextDouble() * 0.15;
-        return Math.max(1, (int) (base * stab * typeMult * rand));
-    }
-
-    /** Multi-hit count using the standard 2–5 hit distribution; otherwise the move's fixed range. */
-    private int rollHitCount(PokemonMove move) {
-        int min = Math.max(1, move.getMinHits());
-        int max = Math.max(min, move.getMaxHits());
-        if (min == max) return min;
-        if (min == 2 && max == 5) {
-            double r = RNG.nextDouble();
-            if (r < 0.375) return 2;
-            if (r < 0.75)  return 3;
-            if (r < 0.875) return 4;
-            return 5;
-        }
-        return min + RNG.nextInt(max - min + 1);
-    }
-
-    private double critChance(PokemonMove move) {
-        return move.getCritRate() > 0 ? 0.125 : 0.0625;
-    }
-
-    /**
-     * Data-driven secondary/primary effects from move metadata: ailments, flinch,
-     * confusion, and stat-stage changes. A move with power 0 applies its effects as
-     * the primary action (guaranteed unless it has a percentage chance); a damaging
-     * move applies them as secondary effects gated by their chance.
-     */
-    private void applyMoveEffects(BattleState s, BattleCombatant attacker, BattleCombatant defender,
-                                  PokemonMove move, int dealtDamage) {
-        boolean damaging = move.getPower() > 0;
-        // If a damaging move missed/no-effect (dealt 0) on a target, skip secondaries.
-        if (damaging && dealtDamage <= 0) return;
-
-        // ── Ailment (status condition) ──
-        if (move.getAilment() != null && !move.getAilment().isBlank()) {
-            int chance = move.getAilmentChance();
-            // PokeAPI reports 0 for guaranteed status moves.
-            boolean apply = chance <= 0 ? !damaging : RNG.nextInt(100) < chance;
-            if (apply) {
-                String ail = move.getAilment();
-                int turns = (ail.equals("SLEEP")) ? 1 + RNG.nextInt(3)
-                          : (ail.equals("CONFUSE")) ? 2 + RNG.nextInt(3) : 0;
-                inflict(s, defender, ail, turns);
-            }
-        }
-
-        // ── Flinch ──
-        if (move.getFlinchChance() > 0 && damaging && !defender.isFainted()) {
-            if (RNG.nextInt(100) < move.getFlinchChance()) defender.setFlinched(true);
-        }
-
-        // ── Stat-stage changes ──
-        if (move.getStatChanges() != null && !move.getStatChanges().isBlank()) {
-            int chance = move.getStatChance();
-            boolean apply = chance <= 0 ? true : RNG.nextInt(100) < chance;
-            if (apply) {
-                BattleCombatant tgt = "self".equalsIgnoreCase(move.getTarget()) ? attacker : defender;
-                if (!tgt.isFainted()) applyStatChanges(s, tgt, move.getStatChanges());
-            }
-        }
-    }
-
-    private static final java.util.Map<String, Integer> STAT_IDX = java.util.Map.of(
-        "atk", 0, "def", 1, "spa", 2, "spd", 3, "spe", 4, "acc", 5, "eva", 6);
-    private static final String[] STAT_NAME = { "Attack", "Defense", "Sp. Atk", "Sp. Def", "Speed", "accuracy", "evasion" };
-
-    private void applyStatChanges(BattleState s, BattleCombatant target, String encoded) {
-        for (String part : encoded.split("\\|")) {
-            String[] kv = part.split(":");
-            if (kv.length != 2) continue;
-            Integer idx = STAT_IDX.get(kv[0].trim());
-            int delta;
-            try { delta = Integer.parseInt(kv[1].trim()); } catch (Exception e) { continue; }
-            if (idx == null || delta == 0) continue;
-            target.addStage(idx, delta);
-            int mag = Math.abs(delta);
-            String amt = mag >= 2 ? " sharply" : "";
-            s.addLog(target.getName() + "'s " + STAT_NAME[idx] + (delta > 0 ? amt + " rose!" : amt + " fell!"));
-        }
-    }
-
-    private void inflict(BattleState s, BattleCombatant target, String status, int turns) {
-        if (target.getStatus() != null || target.isFainted()) return; // one major status at a time
-        target.setStatus(status);
-        target.setStatusTurns(turns);
-        s.addLog(target.getName() + " " + statusVerb(status) + "!");
-    }
-
-    /** Pre-move check: can this combatant act this turn? Handles freeze/sleep/paralyze/confuse. */
-    private boolean canAct(BattleCombatant c, BattleState s) {
-        if (c.isFainted()) return false;
-        String st = c.getStatus();
-        if (st == null) return true;
-
-        switch (st) {
-            case "FREEZE" -> {
-                if (RNG.nextDouble() < 0.20) { c.setStatus(null); s.addLog(c.getName() + " thawed out!"); return true; }
-                s.addLog(c.getName() + " is frozen solid!");
-                return false;
-            }
-            case "SLEEP" -> {
-                c.setStatusTurns(c.getStatusTurns() - 1);
-                if (c.getStatusTurns() <= 0) { c.setStatus(null); s.addLog(c.getName() + " woke up!"); return true; }
-                s.addLog(c.getName() + " is fast asleep.");
-                return false;
-            }
-            case "PARALYZE" -> {
-                if (RNG.nextDouble() < 0.25) { s.addLog(c.getName() + " is paralyzed! It can't move!"); return false; }
-                return true;
-            }
-            case "CONFUSE" -> {
-                c.setStatusTurns(c.getStatusTurns() - 1);
-                if (c.getStatusTurns() <= 0) { c.setStatus(null); s.addLog(c.getName() + " snapped out of confusion!"); return true; }
-                if (RNG.nextDouble() < 0.33) {
-                    int self = Math.max(1, c.getMaxHp() / 12);
-                    c.setCurHp(c.getCurHp() - self);
-                    s.addLog(c.getName() + " is confused! It hurt itself in its confusion (" + self + ").");
-                    return false;
-                }
-                return true;
-            }
-            default -> { return true; }
-        }
-    }
-
-    /** End-of-turn: poison/burn chip damage, then resolve outcome if someone fainted. */
-    private void endOfTurn(BattleState s) {
-        for (BattleCombatant c : new BattleCombatant[]{ s.getPlayer(), s.getWild() }) {
-            if (c.isFainted()) continue;
-            String st = c.getStatus();
-            if ("POISON".equals(st) || "BURN".equals(st)) {
-                int chip = Math.max(1, c.getMaxHp() / 8);
-                c.setCurHp(c.getCurHp() - chip);
-                s.addLog(c.getName() + " was hurt by " + (st.equals("BURN") ? "its burn" : "poison") + " (" + chip + ").");
-            }
-        }
-        resolveOutcome(s);
     }
 
     private void resolveOutcome(BattleState s) {
@@ -541,85 +297,8 @@ public class BattleService {
         }
     }
 
-    // ── Wild AI ────────────────────────────────────────────────────────────────
-
-    private PokemonMove chooseWildMove(BattleCombatant wild, BattleCombatant target) {
-        List<PokemonMove> moves = wild.getMoves();
-        if (moves == null || moves.isEmpty())
-            return new PokemonMove(33, "Tackle", "Normal", "Physical", 40, 100, 35);
-        // Weighted pick: damaging moves weighted by power × type effectiveness; status flat.
-        double[] weights = new double[moves.size()];
-        double total = 0;
-        for (int i = 0; i < moves.size(); i++) {
-            PokemonMove m = moves.get(i);
-            double w;
-            if (m.getPower() > 0) {
-                double tm = TypeChart.multiplier(m.getType(), target.getType1(), target.getType2());
-                w = Math.max(5, m.getPower() * Math.max(0.25, tm));
-            } else {
-                w = 18; // status move base appeal
-            }
-            weights[i] = w;
-            total += w;
-        }
-        double roll = RNG.nextDouble() * total;
-        for (int i = 0; i < moves.size(); i++) {
-            roll -= weights[i];
-            if (roll <= 0) return moves.get(i);
-        }
-        return moves.get(moves.size() - 1);
-    }
-
-    // ── Stat helpers ───────────────────────────────────────────────────────────
-
-    private PokemonMove findMove(BattleCombatant c, int moveId) {
-        if (c.getMoves() == null) return null;
-        return c.getMoves().stream().filter(m -> m.getId() == moveId).findFirst().orElse(null);
-    }
-
-    private boolean matchesType(String moveType, BattleCombatant c) {
-        return moveType != null &&
-            (moveType.equalsIgnoreCase(c.getType1()) || moveType.equalsIgnoreCase(c.getType2()));
-    }
-
-    private int effectiveAttack(BattleCombatant c) {
-        double v = c.getAttack() * stageMult(c.getStage(0));
-        if ("BURN".equals(c.getStatus())) v *= 0.5;
-        return Math.max(1, (int) v);
-    }
-
-    private int effectiveSpAtk(BattleCombatant c) {
-        return Math.max(1, (int) (c.getSpAtk() * stageMult(c.getStage(2))));
-    }
-
-    private int effectiveSpeed(BattleCombatant c) {
-        double v = c.getSpeed() * stageMult(c.getStage(4));
-        if ("PARALYZE".equals(c.getStatus())) v *= 0.5;
-        return Math.max(1, (int) v);
-    }
-
-    private double stageMult(int stage) {
-        return stage >= 0 ? (2.0 + stage) / 2.0 : 2.0 / (2.0 - stage);
-    }
-
-    private double accStageMult(int stage) {
-        return stage >= 0 ? (3.0 + stage) / 3.0 : 3.0 / (3.0 - stage);
-    }
-
     private static int statAtLevel(int base, int level, double iv) {
         return Math.max(1, (int) (base * (level + 50) / 100.0 * iv));
-    }
-
-    private String statusVerb(String status) {
-        return switch (status) {
-            case "SLEEP" -> "fell asleep";
-            case "PARALYZE" -> "was paralyzed";
-            case "POISON" -> "was poisoned";
-            case "BURN" -> "was burned";
-            case "FREEZE" -> "was frozen solid";
-            case "CONFUSE" -> "became confused";
-            default -> "was affected";
-        };
     }
 
     private void purgeStale() {

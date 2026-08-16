@@ -135,7 +135,46 @@ public class PokemonDatabase {
                     STARDUST INT DEFAULT 0,
                     TOTAL_KM DOUBLE DEFAULT 0,
                     LAST_WALK_LAT DOUBLE,
-                    LAST_WALK_LNG DOUBLE
+                    LAST_WALK_LNG DOUBLE,
+                    TEAM VARCHAR(10)
+                )""");
+
+            // Gyms (Milestone 4) — like PokeStops but claimable by a team.
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS GYMS (
+                    ID BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    NAME VARCHAR(100),
+                    LAT DOUBLE,
+                    LNG DOUBLE,
+                    CONTROLLING_TEAM VARCHAR(10),
+                    LAST_SPUN_BY INT,
+                    LAST_SPUN_AT TIMESTAMP
+                )""");
+
+            // Gym defenders — holds a full stat snapshot so both player and NPC
+            // defenders battle uniformly (no dependency on the live CAUGHT_POKEMON row).
+            s.execute("""
+                CREATE TABLE IF NOT EXISTS GYM_DEFENDERS (
+                    ID BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    GYM_ID BIGINT,
+                    PLAYER_ID INT,
+                    CAUGHT_ID BIGINT,
+                    SLOT INT,
+                    MOTIVATION INT DEFAULT 100,
+                    SPECIES_ID INT,
+                    NAME VARCHAR(50),
+                    SPRITE_KEY VARCHAR(50),
+                    TYPE1 VARCHAR(20),
+                    TYPE2 VARCHAR(20),
+                    LEVEL INT,
+                    HP INT,
+                    ATTACK INT,
+                    DEFENSE INT,
+                    SP_ATK INT,
+                    SP_DEF INT,
+                    SPEED INT,
+                    MOVE1 INT, MOVE2 INT, MOVE3 INT, MOVE4 INT,
+                    PLACED_AT TIMESTAMP
                 )""");
 
             // Eggs: obtained from stops, incubated, hatch after walking DISTANCE_KM.
@@ -248,6 +287,8 @@ public class PokemonDatabase {
             runSilent(s, "ALTER TABLE POKESTOPS ADD COLUMN LURE_EXPIRES_AT TIMESTAMP");
             // Wild spawns carry a fixed level (shown on map, used by catch + battle).
             runSilent(s, "ALTER TABLE POKEMON_SPAWNS ADD COLUMN LEVEL INT DEFAULT 0");
+            // Team allegiance (Milestone 4).
+            runSilent(s, "ALTER TABLE POKEMON_PLAYER_STATS ADD COLUMN TEAM VARCHAR(10)");
             conn.commit();
         } catch (Exception e) {
             System.err.println("Schema migration warning: " + e.getMessage());
@@ -742,6 +783,228 @@ public class PokemonDatabase {
         }
     }
 
+    // ── Teams (Milestone 4) ─────────────────────────────────────────────────────
+
+    public String getTeam(int playerId) throws SQLException {
+        getPlayerStats(playerId); // ensure row exists
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT TEAM FROM POKEMON_PLAYER_STATS WHERE PLAYER_ID=?")) {
+            ps.setInt(1, playerId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? rs.getString("TEAM") : null;
+        }
+    }
+
+    public void setTeam(int playerId, String team) throws SQLException {
+        getPlayerStats(playerId);
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE POKEMON_PLAYER_STATS SET TEAM=? WHERE PLAYER_ID=?")) {
+            ps.setString(1, team); ps.setInt(2, playerId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    // ── Gyms (Milestone 4) ──────────────────────────────────────────────────────
+
+    public List<Gym> getAllGyms() throws SQLException {
+        List<Gym> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM GYMS")) {
+            while (rs.next()) list.add(mapGym(rs));
+        }
+        for (Gym g : list) g.setDefenders(getGymDefenders(g.getId()));
+        return list;
+    }
+
+    public Gym getGymById(long id) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM GYMS WHERE ID=?")) {
+            ps.setLong(1, id);
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) return null;
+            Gym g = mapGym(rs);
+            g.setDefenders(getGymDefenders(id));
+            return g;
+        }
+    }
+
+    public int countGyms() throws SQLException {
+        try (Connection conn = getConnection();
+             ResultSet rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM GYMS")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    public long addGym(String name, double lat, double lng, String team) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO GYMS (NAME,LAT,LNG,CONTROLLING_TEAM) VALUES (?,?,?,?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, name); ps.setDouble(2, lat); ps.setDouble(3, lng); ps.setString(4, team);
+            ps.executeUpdate();
+            conn.commit();
+            ResultSet k = ps.getGeneratedKeys();
+            return k.next() ? k.getLong(1) : -1;
+        }
+    }
+
+    public void setGymTeam(long gymId, String team) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE GYMS SET CONTROLLING_TEAM=? WHERE ID=?")) {
+            ps.setString(1, team); ps.setLong(2, gymId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void spinGym(long gymId, int playerId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "UPDATE GYMS SET LAST_SPUN_BY=?, LAST_SPUN_AT=CURRENT_TIMESTAMP WHERE ID=?")) {
+            ps.setInt(1, playerId); ps.setLong(2, gymId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    private Gym mapGym(ResultSet rs) throws SQLException {
+        Gym g = new Gym();
+        g.setId(rs.getLong("ID"));
+        g.setName(rs.getString("NAME"));
+        g.setLat(rs.getDouble("LAT"));
+        g.setLng(rs.getDouble("LNG"));
+        g.setControllingTeam(rs.getString("CONTROLLING_TEAM"));
+        int spunBy = rs.getInt("LAST_SPUN_BY");
+        if (!rs.wasNull()) g.setLastSpunBy(spunBy);
+        Timestamp spunAt = rs.getTimestamp("LAST_SPUN_AT");
+        if (spunAt != null) g.setLastSpunAt(spunAt.toInstant());
+        g.setCanSpin(spunAt == null || Instant.now().isAfter(spunAt.toInstant().plusSeconds(300)));
+        return g;
+    }
+
+    // ── Gym defenders ───────────────────────────────────────────────────────────
+
+    public List<GymDefender> getGymDefenders(long gymId) throws SQLException {
+        List<GymDefender> list = new ArrayList<>();
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM GYM_DEFENDERS WHERE GYM_ID=? ORDER BY SLOT")) {
+            ps.setLong(1, gymId);
+            ResultSet rs = ps.executeQuery();
+            while (rs.next()) list.add(mapDefender(rs));
+        }
+        return list;
+    }
+
+    public GymDefender getDefenderById(long id) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM GYM_DEFENDERS WHERE ID=?")) {
+            ps.setLong(1, id);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? mapDefender(rs) : null;
+        }
+    }
+
+    public int countDefenders(long gymId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM GYM_DEFENDERS WHERE GYM_ID=?")) {
+            ps.setLong(1, gymId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    public long insertDefender(GymDefender d) throws SQLException {
+        String sql = """
+            INSERT INTO GYM_DEFENDERS
+            (GYM_ID,PLAYER_ID,CAUGHT_ID,SLOT,MOTIVATION,SPECIES_ID,NAME,SPRITE_KEY,TYPE1,TYPE2,
+             LEVEL,HP,ATTACK,DEFENSE,SP_ATK,SP_DEF,SPEED,MOVE1,MOVE2,MOVE3,MOVE4,PLACED_AT)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""";
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, d.getGymId());
+            if (d.getPlayerId() != null) ps.setInt(2, d.getPlayerId()); else ps.setNull(2, java.sql.Types.INTEGER);
+            if (d.getCaughtId() != null) ps.setLong(3, d.getCaughtId()); else ps.setNull(3, java.sql.Types.BIGINT);
+            ps.setInt(4, d.getSlot());
+            ps.setInt(5, d.getMotivation());
+            ps.setInt(6, d.getSpeciesId());
+            ps.setString(7, d.getName());
+            ps.setString(8, d.getSpriteKey());
+            ps.setString(9, d.getType1());
+            ps.setString(10, d.getType2());
+            ps.setInt(11, d.getLevel());
+            ps.setInt(12, d.getHp());
+            ps.setInt(13, d.getAttack());
+            ps.setInt(14, d.getDefense());
+            ps.setInt(15, d.getSpAtk());
+            ps.setInt(16, d.getSpDef());
+            ps.setInt(17, d.getSpeed());
+            int[] m = d.getMoveIds();
+            ps.setInt(18, m.length > 0 ? m[0] : 0);
+            ps.setInt(19, m.length > 1 ? m[1] : 0);
+            ps.setInt(20, m.length > 2 ? m[2] : 0);
+            ps.setInt(21, m.length > 3 ? m[3] : 0);
+            ps.setTimestamp(22, Timestamp.from(Instant.now()));
+            ps.executeUpdate();
+            conn.commit();
+            ResultSet k = ps.getGeneratedKeys();
+            return k.next() ? k.getLong(1) : -1;
+        }
+    }
+
+    public void updateDefenderMotivation(long id, int motivation) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE GYM_DEFENDERS SET MOTIVATION=? WHERE ID=?")) {
+            ps.setInt(1, Math.max(0, Math.min(100, motivation))); ps.setLong(2, id);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void deleteDefender(long id) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("DELETE FROM GYM_DEFENDERS WHERE ID=?")) {
+            ps.setLong(1, id);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    public void clearGymDefenders(long gymId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("DELETE FROM GYM_DEFENDERS WHERE GYM_ID=?")) {
+            ps.setLong(1, gymId);
+            ps.executeUpdate();
+            conn.commit();
+        }
+    }
+
+    private GymDefender mapDefender(ResultSet rs) throws SQLException {
+        GymDefender d = new GymDefender();
+        d.setId(rs.getLong("ID"));
+        d.setGymId(rs.getLong("GYM_ID"));
+        int pid = rs.getInt("PLAYER_ID"); if (!rs.wasNull()) d.setPlayerId(pid);
+        long cid = rs.getLong("CAUGHT_ID"); if (!rs.wasNull()) d.setCaughtId(cid);
+        d.setSlot(rs.getInt("SLOT"));
+        d.setMotivation(rs.getInt("MOTIVATION"));
+        d.setSpeciesId(rs.getInt("SPECIES_ID"));
+        d.setName(rs.getString("NAME"));
+        d.setSpriteKey(rs.getString("SPRITE_KEY"));
+        d.setType1(rs.getString("TYPE1"));
+        d.setType2(rs.getString("TYPE2"));
+        d.setLevel(rs.getInt("LEVEL"));
+        d.setHp(rs.getInt("HP"));
+        d.setAttack(rs.getInt("ATTACK"));
+        d.setDefense(rs.getInt("DEFENSE"));
+        d.setSpAtk(rs.getInt("SP_ATK"));
+        d.setSpDef(rs.getInt("SP_DEF"));
+        d.setSpeed(rs.getInt("SPEED"));
+        d.setMoveIds(new int[]{ rs.getInt("MOVE1"), rs.getInt("MOVE2"), rs.getInt("MOVE3"), rs.getInt("MOVE4") });
+        Timestamp t = rs.getTimestamp("PLACED_AT");
+        if (t != null) d.setPlacedAt(t.toInstant());
+        return d;
+    }
+
     // ── Items ─────────────────────────────────────────────────────────────────
 
     public List<PlayerItem> getPlayerItems(int playerId) throws SQLException {
@@ -1125,6 +1388,26 @@ public class PokemonDatabase {
         }
     }
 
+    /**
+     * Resolve the username behind an Android app bearer token.
+     *
+     * The mobile_tokens table is owned and rotated by LexiconServer; we share the
+     * same database, so this is a read-only lookup — never issue or rotate here.
+     * Returns null when the token is unknown or expired.
+     */
+    public String findUsernameByMobileToken(String tokenHash) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                "SELECT p.USERNAME FROM MOBILE_TOKENS t " +
+                "JOIN PLAYERS p ON p.ID = t.USER_ID " +
+                "WHERE t.TOKEN_HASH = ? AND t.EXPIRES_AT > CURRENT_TIMESTAMP")) {
+            ps.setString(1, tokenHash);
+            ResultSet rs = ps.executeQuery();
+            if (!rs.next()) return null;
+            return rs.getString("USERNAME");
+        }
+    }
+
     // ── Move seeding ─────────────────────────────────────────────────────────
 
     private void seedMoves() {
@@ -1316,6 +1599,16 @@ public class PokemonDatabase {
     }
 
     // ── Move CRUD ─────────────────────────────────────────────────────────────
+
+    /** Look up a single move by id (used to build gym-defender/NPC movesets from stored ids). */
+    public pokemon.object.PokemonMove getMoveById(int moveId) throws SQLException {
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM POKEMON_MOVES WHERE ID=?")) {
+            ps.setInt(1, moveId);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? mapMove(rs) : null;
+        }
+    }
 
     public List<pokemon.object.PokemonMove> getCaughtPokemonMoves(long caughtId, int playerId) throws SQLException {
         // Verify ownership by joining with CAUGHT_POKEMON
