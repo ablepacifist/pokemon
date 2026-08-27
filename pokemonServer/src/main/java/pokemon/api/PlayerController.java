@@ -31,15 +31,19 @@ public class PlayerController {
             int level = computeLevel(xp);
             int prevXp = xpForLevel(level);
             int nextXp = xpForLevel(level + 1);
-            return ResponseEntity.ok(Map.of(
-                "username", username,
-                "level", level,
-                "xp", xp,
-                "xpProgress", xp - prevXp,
-                "xpRequired", nextXp - prevXp,
-                "coins", coins,
-                "totalCaught", totalCaught
-            ));
+            double totalKm = Math.round(db.getWalkState(playerId)[0] * 100.0) / 100.0;
+            String team = db.getTeam(playerId);
+            Map<String, Object> resp = new java.util.HashMap<>();
+            resp.put("username", username);
+            resp.put("level", level);
+            resp.put("xp", xp);
+            resp.put("xpProgress", xp - prevXp);
+            resp.put("xpRequired", nextXp - prevXp);
+            resp.put("coins", coins);
+            resp.put("totalCaught", totalCaught);
+            resp.put("totalKm", totalKm);
+            resp.put("team", team);   // may be null
+            return ResponseEntity.ok(resp);
         } catch (Exception e) {
             return ResponseEntity.status(500).body("Error: " + e.getMessage());
         }

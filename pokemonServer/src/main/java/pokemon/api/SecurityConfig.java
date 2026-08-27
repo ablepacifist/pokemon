@@ -12,6 +12,7 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.cors.*;
 
 import java.util.*;
@@ -22,6 +23,9 @@ public class SecurityConfig {
 
     @Autowired
     private PlayerDetailsService playerDetailsService;
+
+    @Autowired
+    private MobileTokenAuthFilter mobileTokenAuthFilter;
 
     @Value("${cors.allowed-origins}")
     private String allowedOrigins;
@@ -48,6 +52,7 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsSource))
             .csrf(csrf -> csrf.disable())
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+            .addFilterBefore(mobileTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
             .formLogin(form -> form.disable());
         return http.build();
     }
@@ -67,6 +72,12 @@ public class SecurityConfig {
         }
         patterns.add("https://alex-dyakin.com");
         patterns.add("https://*.alex-dyakin.com");
+
+        // Android (Capacitor) app — the WebView serves the bundled build from a
+        // local origin, so its fetches are still subject to CORS
+        patterns.add("capacitor://localhost");
+        patterns.add("https://localhost");
+        patterns.add("http://localhost");
 
         if (!exact.isEmpty()) config.setAllowedOrigins(exact);
         if (!patterns.isEmpty()) config.setAllowedOriginPatterns(patterns);

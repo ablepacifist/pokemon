@@ -49,6 +49,23 @@ public class CollectionController {
         }
     }
 
+    @PostMapping("/favourite")
+    public ResponseEntity<?> favourite(@RequestBody Map<String, Object> body) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth.getPrincipal().equals("anonymousUser")) {
+            return ResponseEntity.status(401).body("Login required");
+        }
+        try {
+            int playerId = ((CustomUserDetails) auth.getPrincipal()).getId();
+            long caughtId = ((Number) body.get("caughtId")).longValue();
+            boolean fav = Boolean.TRUE.equals(body.get("favourite"));
+            db.setFavourite(caughtId, playerId, fav);
+            return ResponseEntity.ok("Updated");
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body("Error: " + e.getMessage());
+        }
+    }
+
     /** Returns the list of species IDs the authenticated player has caught at least once. */
     @GetMapping("/caught-species")
     public ResponseEntity<?> caughtSpecies() {

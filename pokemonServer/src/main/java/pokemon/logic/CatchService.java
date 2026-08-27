@@ -39,17 +39,33 @@ public class CatchService {
     @Autowired
     private MoveService moveService;
 
+    @Autowired
+    private BattleService battleService;
+
     /**
      * Returns the caught Pokemon if successful, null if failed, throws if invalid.
      */
     public CaughtPokemon attemptCatch(int playerId, long spawnId, double playerLat,
-                                      double playerLng, String ballType) throws Exception {
+                                      double playerLng, String ballType, String berry) throws Exception {
+        return attemptCatch(playerId, spawnId, playerLat, playerLng, ballType, berry, null);
+    }
+
+    /**
+     * Catch attempt, optionally coming from a battle (battleId). A battle weakens
+     * the wild Pokemon, so its remaining HP grants a catch-rate bonus.
+     */
+    public CaughtPokemon attemptCatch(int playerId, long spawnId, double playerLat,
+                                      double playerLng, String ballType, String berry,
+                                      Long battleId) throws Exception {
         PokemonSpawn spawn = db.getSpawnById(spawnId);
         if (spawn == null) throw new IllegalArgumentException("Spawn not found");
         if (spawn.getCaughtByPlayer() != null) throw new IllegalStateException("Already caught");
 
         double dist = GeospatialUtils.distanceMeters(playerLat, playerLng, spawn.getLat(), spawn.getLng());
         if (dist > MAX_CATCH_DISTANCE_M) throw new IllegalStateException("Too far away (" + (int)dist + "m)");
+
+        int boxCount = db.countCaughtByPlayer(playerId);
+        if (boxCount >= 300) throw new IllegalStateException("Pokemon Box is full (300/300). Transfer some Pokemon first.");
 
         int ballCount = db.getItemCount(playerId, ballType);
         if (ballCount <= 0) throw new IllegalStateException("No " + ballType + " remaining");
@@ -59,6 +75,23 @@ public class CatchService {
         double rate = BASE_CATCH_RATE[Math.min(species.getRarity(), 5)]
                     * BALL_MULTIPLIER.getOrDefault(ballType, 1.0);
 
+        // Battle-weakened Pokemon are easier to catch (HP-based multiplier from the session).
+        if (battleId != null) {
+            double battleBonus = battleService.getCatchBonus(playerId, battleId);
+            rate = Math.min(rate * battleBonus, 1.0);
+        }
+
+        boolean doubleCandy = false;
+        if (berry != null && !berry.isBlank()) {
+            int berryCount = db.getItemCount(playerId, berry);
+            if (berryCount > 0) {
+                db.adjustItem(playerId, berry, -1);
+                if ("RAZZ_BERRY".equals(berry))       rate = Math.min(rate * 1.5, 1.0);
+                else if ("PINAP_BERRY".equals(berry)) doubleCandy = true;
+                // NANAB_BERRY: consumed, no catch-rate bonus (would prevent dodge in full implementation)
+            }
+        }
+
         if (RNG.nextDouble() > rate) {
             try { db.addXp(playerId, 10); } catch (Exception ignored) {}
             return null; // missed
@@ -66,10 +99,19 @@ public class CatchService {
 
         db.markSpawnCaught(spawnId, playerId);
 
-        // Assign level based on rarity
-        int rarity = Math.min(species.getRarity(), 5);
-        int[] range = LEVEL_RANGE[rarity];
-        int level = Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
+        // Catch came from a battle → close out that battle session.
+        if (battleId != null) {
+            try { battleService.endBattle(playerId, battleId); } catch (Exception ignored) {}
+        }
+
+        // Level comes from the spawn (set at spawn time) so it matches what the
+        // map showed and any battle used. Fall back to a rarity roll for old spawns.
+        int level = spawn.getLevel();
+        if (level <= 0) {
+            int rarity = Math.min(species.getRarity(), 5);
+            int[] range = LEVEL_RANGE[rarity];
+            level = Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
+        }
 
         // Compute stats: baseStat * (level + 50) / 100 with ±15% IV variance
         double iv = 0.85 + RNG.nextDouble() * 0.30;
@@ -106,8 +148,9 @@ public class CatchService {
         // Assign the moves this Pokemon knows at its catch level
         try { moveService.assignInitialMoves(id, species.getId(), level); } catch (Exception ignored) {}
 
-        // XP for catching; coins come from battles/gyms only
+        // XP + generic candy for catching
         try { db.addXp(playerId, species.getRarity() * 100); } catch (Exception ignored) {}
+        try { db.adjustItem(playerId, "CANDY_XS", doubleCandy ? 6 : 3); } catch (Exception ignored) {}
 
         return caught;
     }

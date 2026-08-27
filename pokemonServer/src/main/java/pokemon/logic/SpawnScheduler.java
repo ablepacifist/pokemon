@@ -8,8 +8,10 @@ import pokemon.object.PokemonSpecies;
 import pokemon.object.Pokestop;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 
 @Component
 public class SpawnScheduler {
@@ -22,6 +24,11 @@ public class SpawnScheduler {
 
     // Rarity thresholds: roll 1-100 → rarity tier
     private static final int[] RARITY_THRESHOLDS = {0, 60, 85, 95, 99, 100};
+
+    // Wild level ranges per rarity: {minLevel, randomRange}
+    private static final int[][] LEVEL_RANGE = {
+        {0, 0}, {1, 11}, {3, 13}, {8, 13}, {15, 19}, {30, 20}
+    };
 
     @Autowired
     private PokemonDatabase db;
@@ -39,19 +46,22 @@ public class SpawnScheduler {
             List<Pokestop> stops = db.getAllPokestops();
             for (Pokestop stop : stops) {
                 if (RNG.nextDouble() > SPAWN_CHANCE_PER_STOP) continue;
-                int count = 1 + RNG.nextInt(2);
+                int base = 1 + RNG.nextInt(2);
+                int count = stop.isLured() ? base + 2 : base; // lured stops get 2 extra spawns
                 for (int i = 0; i < count; i++) {
-                    spawnAt(species, stop.getLat(), stop.getLng(), SPAWN_RADIUS_STOP_M);
+                    spawnAt(species, stop.getLat(), stop.getLng(), SPAWN_RADIUS_STOP_M, stop.getBiome());
                     spawned++;
                 }
             }
 
             // Spawn near players who were active in the last 30 minutes
+            // Biome is detected from the player's actual location — independent of any pokestop
             List<double[]> playerLocs = db.getRecentPlayerLocations();
             for (double[] pos : playerLocs) {
+                String playerBiome = GeospatialUtils.detectBiome(pos[0], pos[1]);
                 int count = 2 + RNG.nextInt(2); // 2-3 per player per cycle
                 for (int i = 0; i < count; i++) {
-                    spawnAt(species, pos[0], pos[1], SPAWN_RADIUS_PLAYER_M);
+                    spawnAt(species, pos[0], pos[1], SPAWN_RADIUS_PLAYER_M, playerBiome);
                     spawned++;
                 }
             }
@@ -73,21 +83,29 @@ public class SpawnScheduler {
         try {
             List<PokemonSpecies> species = db.getAllSpecies();
             if (species.isEmpty()) return;
+            String biome = GeospatialUtils.detectBiome(lat, lng);
             int count = 1 + RNG.nextInt(2);
-            for (int i = 0; i < count; i++) spawnAt(species, lat, lng, radiusM);
+            for (int i = 0; i < count; i++) spawnAt(species, lat, lng, radiusM, biome);
         } catch (Exception e) {
             System.err.println("[SpawnScheduler] On-demand spawn error: " + e.getMessage());
         }
     }
 
-    private void spawnAt(List<PokemonSpecies> species, double lat, double lng, double radius) throws Exception {
-        PokemonSpecies chosen = pickWeightedSpecies(species);
+    private void spawnAt(List<PokemonSpecies> species, double lat, double lng, double radius, String biome) throws Exception {
+        PokemonSpecies chosen = pickBiomeWeightedSpecies(species, biome);
         double[] pos = GeospatialUtils.randomOffset(lat, lng, radius);
         Instant expires = Instant.now().plusSeconds(SPAWN_DURATION_MIN * 60L);
-        db.insertSpawn(chosen.getId(), pos[0], pos[1], expires);
+        db.insertSpawn(chosen.getId(), pos[0], pos[1], expires, rollLevel(chosen.getRarity()));
     }
 
-    private PokemonSpecies pickWeightedSpecies(List<PokemonSpecies> all) {
+    /** Wild level from rarity (single source of truth — catch + battle read spawn.level). */
+    private int rollLevel(int rarity) {
+        int r = Math.min(Math.max(rarity, 1), 5);
+        int[] range = LEVEL_RANGE[r];
+        return Math.max(1, Math.min(100, range[0] + RNG.nextInt(range[1] + 1)));
+    }
+
+    private PokemonSpecies pickBiomeWeightedSpecies(List<PokemonSpecies> all, String biome) {
         int roll = 1 + RNG.nextInt(100);
         int targetRarity = 1;
         for (int r = 5; r >= 1; r--) {
@@ -97,6 +115,19 @@ public class SpawnScheduler {
         List<PokemonSpecies> pool = all.stream()
             .filter(s -> s.getRarity() == finalRarity).toList();
         if (pool.isEmpty()) pool = all;
-        return pool.get(RNG.nextInt(pool.size()));
+
+        Set<String> favored = switch (biome == null ? "NORMAL" : biome) {
+            case "WATER" -> Set.of("Water", "Ice", "Electric");
+            case "GRASS" -> Set.of("Grass", "Bug", "Normal");
+            default      -> Set.of();
+        };
+        if (favored.isEmpty()) return pool.get(RNG.nextInt(pool.size()));
+
+        List<PokemonSpecies> weighted = new ArrayList<>();
+        for (PokemonSpecies sp : pool) {
+            int w = (favored.contains(sp.getType1()) || favored.contains(sp.getType2())) ? 3 : 1;
+            for (int i = 0; i < w; i++) weighted.add(sp);
+        }
+        return weighted.isEmpty() ? pool.get(RNG.nextInt(pool.size())) : weighted.get(RNG.nextInt(weighted.size()));
     }
 }
