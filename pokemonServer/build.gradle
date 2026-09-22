@@ -18,6 +18,11 @@ dependencies {
     implementation 'org.springframework.security:spring-security-crypto'
     implementation 'com.zaxxer:HikariCP'
     runtimeOnly 'org.hsqldb:hsqldb'
+
+    // No test framework existed in this module; added only to run the
+    // layered-env-config unit test (version managed by the Spring Boot BOM).
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 springBoot {

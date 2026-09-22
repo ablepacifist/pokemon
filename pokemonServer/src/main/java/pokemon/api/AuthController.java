@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -26,10 +27,13 @@ import java.util.Map;
 @RequestMapping("/api/pokemon/auth")
 public class AuthController {
 
-    private static final String LEXICON_INTERNAL = "http://127.0.0.1:36568";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
+
+    // LexiconServer is always reached over loopback; only the port is configurable.
+    @Value("${lexicon.port:36568}")
+    private String lexiconPort;
 
     @Autowired private AuthenticationManager authManager;
     @Autowired private PlayerDetailsService playerDetailsService;
@@ -62,7 +66,7 @@ public class AuthController {
             // Validate token against LexiconServer (internal server-to-server call)
             String jsonBody = MAPPER.writeValueAsString(Map.of("token", token));
             HttpRequest httpReq = HttpRequest.newBuilder()
-                    .uri(URI.create(LEXICON_INTERNAL + "/api/auth/sso/validate-token"))
+                    .uri(URI.create("http://127.0.0.1:" + lexiconPort + "/api/auth/sso/validate-token"))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .build();

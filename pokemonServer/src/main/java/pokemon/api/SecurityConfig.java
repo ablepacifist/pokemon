@@ -27,8 +27,17 @@ public class SecurityConfig {
     @Autowired
     private MobileTokenAuthFilter mobileTokenAuthFilter;
 
-    @Value("${cors.allowed-origins}")
+    @Value("${cors.allowed-origins:}")
     private String allowedOrigins;
+
+    @Value("${cors.allowed-origin-patterns:}")
+    private String allowedOriginPatterns;
+
+    @Value("${cors.lan-host:}")
+    private String lanHost;
+
+    @Value("${cors.playit-host:}")
+    private String playitHost;
 
     @Bean
     public PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
@@ -63,21 +72,14 @@ public class SecurityConfig {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowCredentials(true);
 
-        List<String> origins = Arrays.asList(allowedOrigins.split(","));
-        List<String> exact = new ArrayList<>();
-        List<String> patterns = new ArrayList<>();
-        for (String o : origins) {
-            String t = o.trim();
-            if (t.contains("*")) patterns.add(t); else exact.add(t);
-        }
-        patterns.add("https://alex-dyakin.com");
-        patterns.add("https://*.alex-dyakin.com");
+        List<String> exact = splitNonBlank(allowedOrigins);
+        List<String> patterns = new ArrayList<>(splitNonBlank(allowedOriginPatterns));
 
-        // Android (Capacitor) app — the WebView serves the bundled build from a
-        // local origin, so its fetches are still subject to CORS
-        patterns.add("capacitor://localhost");
-        patterns.add("https://localhost");
-        patterns.add("http://localhost");
+        // LAN and PlayIt tunnel hosts are reachable on any port; only added
+        // when configured (cors.lan-host / cors.playit-host, from LAN_HOST /
+        // PLAYIT_HOST in the layered env).
+        if (lanHost != null && !lanHost.isBlank()) patterns.add("http://" + lanHost.trim() + ":*");
+        if (playitHost != null && !playitHost.isBlank()) patterns.add("http://" + playitHost.trim() + ":*");
 
         if (!exact.isEmpty()) config.setAllowedOrigins(exact);
         if (!patterns.isEmpty()) config.setAllowedOriginPatterns(patterns);
@@ -88,5 +90,15 @@ public class SecurityConfig {
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return source;
+    }
+
+    private static List<String> splitNonBlank(String csv) {
+        if (csv == null || csv.isBlank()) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String s : csv.split(",")) {
+            String t = s.trim();
+            if (!t.isEmpty()) out.add(t);
+        }
+        return out;
     }
 }
