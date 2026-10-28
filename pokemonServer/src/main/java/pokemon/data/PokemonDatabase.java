@@ -21,12 +21,16 @@ public class PokemonDatabase {
     @Value("${database.url}")
     private String dbUrl;
 
+    @Value("${database.password:}")
+    private String dbPassword;
+
     @PostConstruct
     public void init() throws Exception {
         Class.forName("org.hsqldb.jdbc.JDBCDriver");
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(dbUrl);
         config.setUsername("SA");
+        config.setPassword(dbPassword);
         config.setMaximumPoolSize(10);
         config.setInitializationFailTimeout(0);
         config.setConnectionTimeout(15000);
