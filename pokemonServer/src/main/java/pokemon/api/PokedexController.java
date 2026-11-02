@@ -54,9 +54,8 @@ public class PokedexController {
     @GetMapping("/sprites/{filename:.+}")
     public ResponseEntity<Resource> sprite(@PathVariable String filename) {
         try {
-            Path path = Paths.get(spritesPath, filename);
-            File file = path.toFile();
-            if (!file.exists()) return ResponseEntity.notFound().build();
+            File file = SafeFiles.resolveUnder(spritesPath, filename);
+            if (file == null || !file.isFile()) return ResponseEntity.notFound().build();
             return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG)
                 .body(new FileSystemResource(file));
         } catch (Exception e) {
@@ -70,9 +69,9 @@ public class PokedexController {
         try {
             String sub = request.getRequestURI().split("/item-sprites/", 2)[1];
             String[] parts = sub.split("/");
-            File file = Paths.get(itemSpritesPath, parts).toFile();
-            if (!file.exists()) file = Paths.get(itemSpritesFallback, parts).toFile();
-            if (!file.exists()) return ResponseEntity.notFound().build();
+            File file = SafeFiles.resolveUnder(itemSpritesPath, parts);
+            if (file == null || !file.isFile()) file = SafeFiles.resolveUnder(itemSpritesFallback, parts);
+            if (file == null || !file.isFile()) return ResponseEntity.notFound().build();
             String ct = sub.endsWith(".png") ? "image/png" : "image/webp";
             return ResponseEntity.ok().contentType(MediaType.parseMediaType(ct))
                 .body(new FileSystemResource(file));

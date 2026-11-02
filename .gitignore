@@ -5,3 +5,5 @@ pokemonServer/.gradle/
 *.lck
 .idea/
 .vscode/
+.env
+pokemonServer/.env
