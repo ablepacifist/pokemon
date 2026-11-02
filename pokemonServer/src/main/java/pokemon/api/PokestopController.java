@@ -106,10 +106,17 @@ public class PokestopController {
 
     @PostMapping("/pokestop/add")
     public ResponseEntity<?> addStop(@RequestBody Map<String, Object> body) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated() || auth.getPrincipal().equals("anonymousUser")) {
+            return ResponseEntity.status(401).body("Login required");
+        }
         try {
-            String name = body.getOrDefault("name", "Pokestop").toString();
+            String name = body.getOrDefault("name", "Pokestop").toString().trim();
             double lat = ((Number) body.get("lat")).doubleValue();
             double lng = ((Number) body.get("lng")).doubleValue();
+            if (name.isEmpty() || name.length() > 60 || !(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) {
+                return ResponseEntity.badRequest().body("Invalid name or coordinates");
+            }
             String biome = GeospatialUtils.detectBiome(lat, lng);
             db.addPokestop(name, lat, lng, biome);
             return ResponseEntity.ok("Pokestop added: " + name + " (biome: " + biome + ")");
